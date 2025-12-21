@@ -1,19 +1,19 @@
 # fireql
 
-Firestore を SQL で操作する Rust 製 CLI / ライブラリです。
+A Rust CLI / library for querying Firestore with SQL.
 
-[English](README_en.md) | [詳細ドキュメント](docs/USAGE.md)
+[日本語](README.md) | [Detailed Documentation](docs/USAGE_en.md)
 
-## 対応 SQL
+## Supported SQL
 
 - `SELECT ... FROM <collection>` / `FROM collection_group('name')`
-- `WHERE`（AND / OR / 比較 / IN / IS NULL / array_contains / array_contains_any / ref / timestamp / CURRENT_TIMESTAMP）
-- 集約: `COUNT`, `SUM`, `AVG`
+- `WHERE` (AND / OR / comparison / IN / IS NULL / array_contains / array_contains_any / ref / timestamp / CURRENT_TIMESTAMP)
+- Aggregation: `COUNT`, `SUM`, `AVG`
 - `ORDER BY` / `LIMIT`
 - `UPDATE ... SET ... WHERE ...`
 - `DELETE FROM ... WHERE ...`
 
-## 例
+## Examples
 
 ```sql
 SELECT * FROM users WHERE age >= 18 ORDER BY age DESC LIMIT 10;
@@ -40,20 +40,20 @@ fireql --project-id my-project --sql "SELECT * FROM users LIMIT 5" --pretty
 cat query.sql | fireql --project-id my-project
 ```
 
-`--batch-parallelism` で UPDATE/DELETE のバッチ実行を並列化できます。
+Use `--batch-parallelism` to parallelize batch writes for UPDATE/DELETE.
 
 ```bash
 fireql --project-id my-project --sql "DELETE FROM users WHERE disabled = true" --batch-parallelism 4
 ```
 
-### 認証
+### Authentication
 
-- ADC（`gcloud auth application-default login` など）
-- サービスアカウント JSON（`--credentials /path/to/key.json`）
+- ADC (`gcloud auth application-default login`, etc.)
+- Service account JSON (`--credentials /path/to/key.json`)
 
-## ライブラリ
+## Library
 
-ライブラリとして使う場合、結果は `FireqlValue` 型で返されます。Firestore 固有の型情報（Timestamp, Reference など）がそのまま保持されます。
+When used as a library, results are returned as typed `FireqlValue` values. Firestore-specific type information (Timestamp, Reference, etc.) is preserved.
 
 ```rust
 use fireql::{Fireql, FireqlConfig, FireqlOutput, FireqlValue};
@@ -66,7 +66,7 @@ let fireql = Fireql::new(
 
 let output = fireql.execute("SELECT * FROM users LIMIT 5").await?;
 
-// 型付きデータとしてアクセス
+// Access as typed data
 if let FireqlOutput::Rows(docs) = &output {
     for doc in docs {
         match doc.data.get("created_at") {
@@ -77,13 +77,13 @@ if let FireqlOutput::Rows(docs) = &output {
     }
 }
 
-// JSON として出力（Firestore 型情報付き）
+// Output as JSON (with Firestore type info)
 println!("{}", serde_json::to_string_pretty(&output)?);
 ```
 
-## 出力形式
+## Output Format
 
-Firestore 固有の型（Timestamp, Reference, GeoPoint, Bytes）は `_firestore_type` タグ付きで JSON 出力されます。プリミティブ型（null, bool, int, double, string）はそのままです。
+Firestore-specific types (Timestamp, Reference, GeoPoint, Bytes) are serialized with a `_firestore_type` tag. Primitive types (null, bool, int, double, string) are output as-is.
 
 ```json
 [
@@ -106,17 +106,17 @@ Firestore 固有の型（Timestamp, Reference, GeoPoint, Bytes）は `_firestore
 ]
 ```
 
-集約クエリ:
+Aggregation queries:
 
 ```json
 { "count": { "_firestore_type": "integer", "value": 123 } }
 ```
 
-集約のキー名は関数名（`count`/`sum`/`avg`）または `AS` の別名です。
+Aggregation keys are the function name (`count`/`sum`/`avg`) or the `AS` alias.
 
-## Emulator テスト
+## Emulator Tests
 
-`FIRESTORE_EMULATOR_HOST` を設定したときのみ統合テストが実行されます。
+Integration tests run only when `FIRESTORE_EMULATOR_HOST` is set.
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080

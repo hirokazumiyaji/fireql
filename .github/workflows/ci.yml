@@ -1,0 +1,45 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Java
+        run: sudo apt-get update && sudo apt-get install -y openjdk-17-jre-headless
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: fireql-emulator
+          install_components: cloud-firestore-emulator
+      - name: Start Firestore emulator
+        run: |
+          gcloud beta emulators firestore start --host-port=localhost:8080 --quiet > /tmp/firestore-emulator.log 2>&1 &
+          for i in {1..30}; do
+            if nc -z localhost 8080; then
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "Firestore emulator failed to start"
+          cat /tmp/firestore-emulator.log
+          exit 1
+      - name: Rustfmt
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Run tests
+        env:
+          FIRESTORE_EMULATOR_HOST: localhost:8080
+          FIRESTORE_PROJECT_ID: fireql-emulator
+          GOOGLE_CLOUD_PROJECT: fireql-emulator
+        run: cargo test --all
