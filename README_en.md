@@ -83,7 +83,7 @@ println!("{}", serde_json::to_string_pretty(&output)?);
 
 ## Output Format
 
-Firestore-specific types (Timestamp, Reference, GeoPoint, Bytes) are serialized with a `_firestore_type` tag. Primitive types (null, bool, int, double, string) are output as-is.
+All values are serialized with a `_firestore_type` tag, including primitive types (null, bool, int, double, string).
 
 ```json
 [

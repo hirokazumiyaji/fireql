@@ -223,9 +223,16 @@ fn try_parse_delete_collection_group(input: &str) -> Result<Option<StatementAst>
     }
 
     let rest_trimmed = parts.next().unwrap_or("").trim_start();
-    if !rest_trimmed
-        .get(..21)
-        .map_or(false, |s| s.eq_ignore_ascii_case("from collection_group"))
+    let mut words = rest_trimmed.splitn(2, char::is_whitespace);
+    if !words.next().unwrap_or("").eq_ignore_ascii_case("from") {
+        return Ok(None);
+    }
+    let after_from = words.next().unwrap_or("").trim_start();
+    if !after_from
+        .split_once('(')
+        .is_some_and(|(name, _)| {
+            name.trim().eq_ignore_ascii_case("collection_group")
+        })
     {
         return Ok(None);
     }

@@ -131,16 +131,13 @@ fn validate_query_constraints(filter: Option<&FilterExpr>, order_by: &[OrderBy])
     }
 
     if let Some(field) = stats.inequality_fields.iter().next() {
-        if order_by.is_empty() {
-            return Err(FireqlError::InvalidQuery(format!(
-                "Firestore requires ORDER BY on the inequality field: {field}"
-            )));
-        }
-        let first = &order_by[0].field;
-        if first != field {
-            return Err(FireqlError::InvalidQuery(format!(
-                "First ORDER BY field must match inequality field: expected {field}, got {first}"
-            )));
+        if !order_by.is_empty() {
+            let first = &order_by[0].field;
+            if first != field {
+                return Err(FireqlError::InvalidQuery(format!(
+                    "First ORDER BY field must match inequality field: expected {field}, got {first}"
+                )));
+            }
         }
     }
 
@@ -444,15 +441,14 @@ mod tests {
     }
 
     #[test]
-    fn inequality_requires_order_by() {
+    fn inequality_without_order_by_is_allowed() {
         let filter = FilterExpr::Compare {
             field: "age".to_string(),
             op: CompareOp::Gt,
             value: JsonValue::from(10),
         };
-        let err =
-            build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
-        assert!(matches!(err, FireqlError::InvalidQuery(_)));
+        let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
+        assert!(result.is_ok());
     }
 
     #[test]

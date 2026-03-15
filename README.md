@@ -83,7 +83,7 @@ println!("{}", serde_json::to_string_pretty(&output)?);
 
 ## 出力形式
 
-Firestore 固有の型（Timestamp, Reference, GeoPoint, Bytes）は `_firestore_type` タグ付きで JSON 出力されます。プリミティブ型（null, bool, int, double, string）はそのままです。
+すべての値は `_firestore_type` タグ付きで JSON 出力されます。プリミティブ型（null, bool, int, double, string）も同様です。
 
 ```json
 [

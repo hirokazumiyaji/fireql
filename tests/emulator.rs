@@ -143,7 +143,7 @@ async fn emulator_collection_group_select() -> Result<(), Box<dyn std::error::Er
             &parent_path,
             "posts",
             Some("post1"),
-            &json!({"title": post_title, "likes": 1}),
+            &json!({"title": &post_title, "likes": 1}),
             None,
         )
         .await?;

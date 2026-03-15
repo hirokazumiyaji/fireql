@@ -20,7 +20,7 @@ jobs:
         uses: google-github-actions/setup-gcloud@v2
         with:
           project_id: fireql-emulator
-          install_components: cloud-firestore-emulator
+          install_components: beta,cloud-firestore-emulator
       - name: Start Firestore emulator
         run: |
           gcloud beta emulators firestore start --host-port=localhost:8080 --quiet > /tmp/firestore-emulator.log 2>&1 &
