@@ -14,8 +14,10 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
-      - name: Install Java
-        run: sudo apt-get update && sudo apt-get install -y openjdk-21-jre-headless
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
