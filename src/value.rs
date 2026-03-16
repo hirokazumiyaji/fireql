@@ -59,7 +59,8 @@ impl FireqlValue {
     }
 }
 
-// All types serialize with a consistent `_firestore_type` + `value` schema.
+// All types serialize with `_firestore_type`. Most include a `value` key,
+// but `Null` omits it and `GeoPoint` uses `latitude`/`longitude` instead.
 impl Serialize for FireqlValue {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         match self {

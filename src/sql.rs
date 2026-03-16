@@ -441,10 +441,12 @@ fn parse_projection(items: &[SelectItem]) -> Result<SelectProjection> {
         }
         validate_unique_aggregate_aliases(&aggregates)?;
         Ok(SelectProjection::Aggregations(aggregates))
-    } else if fields.is_empty() {
+    } else if has_wildcard {
         Ok(SelectProjection::Fields(Projection::All))
-    } else {
+    } else if !fields.is_empty() {
         Ok(SelectProjection::Fields(Projection::Fields(fields)))
+    } else {
+        Ok(SelectProjection::Fields(Projection::All))
     }
 }
 
@@ -592,7 +594,7 @@ fn parse_limit_expr(expr: &Expr) -> Result<Option<u32>> {
     match expr {
         Expr::Value(vws) => match &vws.value {
             Value::Number(value, _) => value.parse::<u32>().map(Some).map_err(|_| {
-                FireqlError::Unsupported("LIMIT must be a positive integer".to_string())
+                FireqlError::Unsupported("LIMIT must be a non-negative integer".to_string())
             }),
             _ => Err(FireqlError::Unsupported(
                 "LIMIT must be a numeric literal".to_string(),
@@ -1169,5 +1171,19 @@ mod tests {
     fn aggregate_cannot_mix_fields() {
         let err = parse_sql("SELECT name, COUNT(*) FROM users").unwrap_err();
         assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn select_wildcard_with_fields_is_all() {
+        let stmt = parse_sql("SELECT *, name FROM users").unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert!(matches!(
+                    select.projection,
+                    SelectProjection::Fields(Projection::All)
+                ));
+            }
+            _ => panic!("expected select"),
+        }
     }
 }

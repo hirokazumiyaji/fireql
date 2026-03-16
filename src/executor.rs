@@ -134,6 +134,8 @@ async fn execute_batch_write(
         Some(db.get_documents_path().as_str()),
     )?;
 
+    // NOTE: All matching documents are loaded into memory before batching.
+    // For large result sets, callers should use LIMIT to bound memory usage.
     let docs = db.query_doc(params).await?;
     let doc_names: Vec<String> = docs.into_iter().map(|doc| doc.name).collect();
 

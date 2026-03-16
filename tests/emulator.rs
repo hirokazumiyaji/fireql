@@ -26,7 +26,11 @@ async fn open_db(project_id: &str) -> Option<FirestoreDb> {
     match FirestoreDb::with_options(FirestoreDbOptions::new(project_id.to_string())).await {
         Ok(db) => Some(db),
         Err(err) => {
-            eprintln!("skip emulator test: failed to create FirestoreDb: {err}");
+            let emulator_host =
+                env::var("FIRESTORE_EMULATOR_HOST").unwrap_or_else(|_| "<not set>".to_string());
+            eprintln!(
+                "skip emulator test: failed to create FirestoreDb for project '{project_id}' with FIRESTORE_EMULATOR_HOST='{emulator_host}': {err}"
+            );
             None
         }
     }
@@ -36,7 +40,9 @@ async fn open_fireql(project_id: &str) -> Option<Fireql> {
     match Fireql::new(FireqlConfig::new(project_id)).await {
         Ok(fireql) => Some(fireql),
         Err(err) => {
-            eprintln!("skip emulator test: failed to create Fireql: {err}");
+            eprintln!(
+                "skip emulator test: failed to create Fireql for project '{project_id}': {err}"
+            );
             None
         }
     }

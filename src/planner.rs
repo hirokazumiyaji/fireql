@@ -135,7 +135,7 @@ fn validate_query_constraints(filter: Option<&FilterExpr>, order_by: &[OrderBy])
             let first = &order_by[0].field;
             if first != field {
                 return Err(FireqlError::InvalidQuery(format!(
-                    "First ORDER BY field must match inequality field: expected {field}, got {first}"
+                    "When ORDER BY is used with an inequality filter, the first ORDER BY field must match the inequality field: expected `{field}`, got `{first}`"
                 )));
             }
         }
