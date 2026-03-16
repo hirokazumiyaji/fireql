@@ -2,6 +2,9 @@
 name = "fireql"
 version = "0.1.0"
 edition = "2021"
+description = "SQL query interface for Google Cloud Firestore"
+license = "MIT"
+repository = "https://github.com/hirokazumiyaji/fireql"
 
 [dependencies]
 firestore = { version = "0.48", default-features = false, features = ["tls-webpki-roots"] }
