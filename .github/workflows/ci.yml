@@ -15,7 +15,7 @@ jobs:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
       - name: Install Java
-        run: sudo apt-get update && sudo apt-get install -y openjdk-17-jre-headless
+        run: sudo apt-get update && sudo apt-get install -y openjdk-21-jre-headless
       - name: Setup gcloud
         uses: google-github-actions/setup-gcloud@v2
         with:
