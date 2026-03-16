@@ -417,8 +417,17 @@ fn collection_id(collection: &CollectionSpec) -> FirestoreQueryCollection {
     }
 }
 
+fn is_absolute_resource_name(path: &str) -> bool {
+    let mut segments = path.split('/');
+    segments.next() == Some("projects")
+        && segments.next().is_some()
+        && segments.next() == Some("databases")
+        && segments.next().is_some()
+        && segments.next() == Some("documents")
+}
+
 fn expand_reference_path(path: &str, base_doc_path: Option<&str>) -> Result<String> {
-    if path.contains("/documents/") || path.starts_with("projects/") {
+    if is_absolute_resource_name(path) {
         return Ok(path.to_string());
     }
     let base = base_doc_path
@@ -646,6 +655,53 @@ mod tests {
         match fv.value.value_type {
             Some(ValueType::ReferenceValue(path)) => {
                 assert_eq!(path, "projects/p/databases/(default)/documents/users/u1");
+            }
+            _ => panic!("expected reference value"),
+        }
+    }
+
+    #[test]
+    fn reference_relative_path_starting_with_projects_is_expanded() {
+        let value = JsonValue::Object(
+            [(
+                FIREQL_REF_KEY.to_string(),
+                JsonValue::String("projects/p1".to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let fv = json_to_firestore_value_with_context(
+            &value,
+            Some("projects/p/databases/(default)/documents"),
+        )
+        .unwrap();
+        match fv.value.value_type {
+            Some(ValueType::ReferenceValue(path)) => {
+                assert_eq!(path, "projects/p/databases/(default)/documents/projects/p1");
+            }
+            _ => panic!("expected reference value"),
+        }
+    }
+
+    #[test]
+    fn reference_absolute_path_is_preserved() {
+        let abs = "projects/p/databases/(default)/documents/users/u1";
+        let value = JsonValue::Object(
+            [(
+                FIREQL_REF_KEY.to_string(),
+                JsonValue::String(abs.to_string()),
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let fv = json_to_firestore_value_with_context(
+            &value,
+            Some("projects/other/databases/(default)/documents"),
+        )
+        .unwrap();
+        match fv.value.value_type {
+            Some(ValueType::ReferenceValue(path)) => {
+                assert_eq!(path, abs);
             }
             _ => panic!("expected reference value"),
         }

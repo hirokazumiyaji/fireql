@@ -286,8 +286,19 @@ fn parse_query(query: Query) -> Result<StatementAst> {
     };
 
     let limit_expr = match query.limit_clause {
-        Some(sqlparser::ast::LimitClause::LimitOffset { limit, .. }) => limit,
-        Some(sqlparser::ast::LimitClause::OffsetCommaLimit { limit, .. }) => Some(limit),
+        Some(sqlparser::ast::LimitClause::LimitOffset { limit, offset, .. }) => {
+            if offset.is_some() {
+                return Err(FireqlError::Unsupported(
+                    "OFFSET is not supported".to_string(),
+                ));
+            }
+            limit
+        }
+        Some(sqlparser::ast::LimitClause::OffsetCommaLimit { .. }) => {
+            return Err(FireqlError::Unsupported(
+                "OFFSET is not supported".to_string(),
+            ));
+        }
         None => None,
     };
 
@@ -304,6 +315,23 @@ fn parse_select(
     order_by_exprs: Vec<OrderByExpr>,
     limit_expr: Option<Expr>,
 ) -> Result<StatementAst> {
+    if select.distinct.is_some() {
+        return Err(FireqlError::Unsupported(
+            "DISTINCT is not supported".to_string(),
+        ));
+    }
+    if !matches!(select.group_by, sqlparser::ast::GroupByExpr::Expressions(ref exprs, _) if exprs.is_empty())
+    {
+        return Err(FireqlError::Unsupported(
+            "GROUP BY is not supported".to_string(),
+        ));
+    }
+    if select.having.is_some() {
+        return Err(FireqlError::Unsupported(
+            "HAVING is not supported".to_string(),
+        ));
+    }
+
     if select.from.len() != 1 {
         return Err(FireqlError::Unsupported(
             "Only one FROM source is supported".to_string(),
@@ -1170,6 +1198,31 @@ mod tests {
     #[test]
     fn aggregate_cannot_mix_fields() {
         let err = parse_sql("SELECT name, COUNT(*) FROM users").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn distinct_is_rejected() {
+        let err = parse_sql("SELECT DISTINCT name FROM users").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn group_by_is_rejected() {
+        let err = parse_sql("SELECT COUNT(*) FROM users GROUP BY team").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn having_is_rejected() {
+        let err =
+            parse_sql("SELECT COUNT(*) FROM users GROUP BY team HAVING COUNT(*) > 1").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn offset_is_rejected() {
+        let err = parse_sql("SELECT * FROM users LIMIT 10 OFFSET 20").unwrap_err();
         assert!(matches!(err, FireqlError::Unsupported(_)));
     }
 
