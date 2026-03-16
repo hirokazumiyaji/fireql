@@ -113,7 +113,10 @@ impl Serialize for FireqlValue {
                 map.serialize_entry("value", r)?;
                 map.end()
             }
-            Self::GeoPoint { latitude, longitude } => {
+            Self::GeoPoint {
+                latitude,
+                longitude,
+            } => {
                 let mut map = serializer.serialize_map(Some(3))?;
                 map.serialize_entry("_firestore_type", "geopoint")?;
                 map.serialize_entry("latitude", latitude)?;

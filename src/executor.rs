@@ -156,8 +156,7 @@ async fn execute_batch_write(
                 let parent = parts.parent_path(db.get_documents_path().as_str());
                 match &op {
                     BatchOp::Update(update_parts) => {
-                        let doc_path =
-                            format!("{parent}/{}/{}", parts.collection, parts.id);
+                        let doc_path = format!("{parent}/{}/{}", parts.collection, parts.id);
                         let update_doc =
                             firestore_document_from_map(&doc_path, update_parts.fields.clone())?;
                         batch.add(FireqlWrite(Write {

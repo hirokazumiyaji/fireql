@@ -230,9 +230,7 @@ fn try_parse_delete_collection_group(input: &str) -> Result<Option<StatementAst>
     let after_from = words.next().unwrap_or("").trim_start();
     if !after_from
         .split_once('(')
-        .is_some_and(|(name, _)| {
-            name.trim().eq_ignore_ascii_case("collection_group")
-        })
+        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("collection_group"))
     {
         return Ok(None);
     }
@@ -820,7 +818,10 @@ fn parse_value_expr(expr: &Expr) -> Result<JsonValue> {
         Expr::Function(function) => parse_value_function(function),
         Expr::Identifier(ident) => {
             if ident.value.eq_ignore_ascii_case("current_timestamp") {
-                Ok(sentinel_object(FIREQL_CURRENT_TS_KEY, JsonValue::Bool(true)))
+                Ok(sentinel_object(
+                    FIREQL_CURRENT_TS_KEY,
+                    JsonValue::Bool(true),
+                ))
             } else {
                 Err(FireqlError::Unsupported(format!(
                     "Unsupported identifier in value expression: {ident:?}"
@@ -882,7 +883,10 @@ fn parse_value_function(function: &sqlparser::ast::Function) -> Result<JsonValue
                     "CURRENT_TIMESTAMP expects no arguments".to_string(),
                 ));
             }
-            Ok(sentinel_object(FIREQL_CURRENT_TS_KEY, JsonValue::Bool(true)))
+            Ok(sentinel_object(
+                FIREQL_CURRENT_TS_KEY,
+                JsonValue::Bool(true),
+            ))
         }
         _ => Err(FireqlError::Unsupported(format!(
             "Unsupported function in value expression: {name}"
