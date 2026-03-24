@@ -125,8 +125,7 @@ mod tests {
 
     #[test]
     fn with_credentials_path_sets_file_source() {
-        let config = FireqlConfig::new("my-project")
-            .with_credentials_path("/tmp/creds.json");
+        let config = FireqlConfig::new("my-project").with_credentials_path("/tmp/creds.json");
         match config.credentials_source {
             Some(CredentialSource::FilePath(path)) => {
                 assert_eq!(path.to_str().unwrap(), "/tmp/creds.json");
@@ -138,8 +137,7 @@ mod tests {
     #[test]
     fn with_credentials_json_sets_json_source() {
         let json = r#"{"type":"service_account","project_id":"test"}"#;
-        let config = FireqlConfig::new("my-project")
-            .with_credentials_json(json);
+        let config = FireqlConfig::new("my-project").with_credentials_json(json);
         match config.credentials_source {
             Some(CredentialSource::Json(stored)) => {
                 assert_eq!(stored, json);
@@ -150,8 +148,8 @@ mod tests {
 
     #[test]
     fn with_authorized_user_builds_valid_json() {
-        let config = FireqlConfig::new("my-project")
-            .with_authorized_user("cid", "csecret", "rtoken");
+        let config =
+            FireqlConfig::new("my-project").with_authorized_user("cid", "csecret", "rtoken");
         match config.credentials_source {
             Some(CredentialSource::Json(json)) => {
                 let v: serde_json::Value = serde_json::from_str(&json).unwrap();
@@ -166,9 +164,11 @@ mod tests {
 
     #[test]
     fn with_credentials_json_does_not_validate() {
-        let config = FireqlConfig::new("my-project")
-            .with_credentials_json("not valid json");
-        assert!(matches!(config.credentials_source, Some(CredentialSource::Json(_))));
+        let config = FireqlConfig::new("my-project").with_credentials_json("not valid json");
+        assert!(matches!(
+            config.credentials_source,
+            Some(CredentialSource::Json(_))
+        ));
     }
 
     #[test]
@@ -176,11 +176,17 @@ mod tests {
         let config = FireqlConfig::new("my-project")
             .with_credentials_path("/tmp/creds.json")
             .with_credentials_json(r#"{"type":"service_account"}"#);
-        assert!(matches!(config.credentials_source, Some(CredentialSource::Json(_))));
+        assert!(matches!(
+            config.credentials_source,
+            Some(CredentialSource::Json(_))
+        ));
 
         let config = FireqlConfig::new("my-project")
             .with_credentials_json(r#"{"type":"service_account"}"#)
             .with_credentials_path("/tmp/creds.json");
-        assert!(matches!(config.credentials_source, Some(CredentialSource::FilePath(_))));
+        assert!(matches!(
+            config.credentials_source,
+            Some(CredentialSource::FilePath(_))
+        ));
     }
 }
