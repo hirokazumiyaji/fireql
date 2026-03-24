@@ -1,6 +1,6 @@
 [package]
 name = "fireql"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "SQL query interface for Google Cloud Firestore"
 license = "MIT"
