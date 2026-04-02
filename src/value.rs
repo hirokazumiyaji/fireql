@@ -119,7 +119,7 @@ impl Serialize for FireqlValue {
             Self::Reference(r) => {
                 let mut map = serializer.serialize_map(Some(2))?;
                 map.serialize_entry("_firestore_type", "reference")?;
-                map.serialize_entry("value", r)?;
+                map.serialize_entry("value", to_relative_path(r))?;
                 map.end()
             }
             Self::GeoPoint {
@@ -180,5 +180,31 @@ mod tests {
     fn test_to_relative_path_no_documents_prefix() {
         let path = "some/other/path";
         assert_eq!(to_relative_path(path), "some/other/path");
+    }
+
+    #[test]
+    fn test_serialize_reference_normal() {
+        let val = FireqlValue::Reference(
+            "projects/p/databases/(default)/documents/users/u1".to_string(),
+        );
+        let json = serde_json::to_value(&val).unwrap();
+        assert_eq!(json["_firestore_type"], "reference");
+        assert_eq!(json["value"], "users/u1");
+    }
+
+    #[test]
+    fn test_serialize_reference_nested_collection() {
+        let val = FireqlValue::Reference(
+            "projects/p/databases/(default)/documents/users/u1/posts/p1".to_string(),
+        );
+        let json = serde_json::to_value(&val).unwrap();
+        assert_eq!(json["value"], "users/u1/posts/p1");
+    }
+
+    #[test]
+    fn test_serialize_reference_fallback() {
+        let val = FireqlValue::Reference("some/other/path".to_string());
+        let json = serde_json::to_value(&val).unwrap();
+        assert_eq!(json["value"], "some/other/path");
     }
 }
