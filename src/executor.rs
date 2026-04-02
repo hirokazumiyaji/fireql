@@ -1,5 +1,5 @@
 use crate::error::{FireqlError, Result};
-use crate::joiner::{chunk_keys, extract_join_keys, hash_join};
+use crate::joiner::{chunk_keys, extract_join_keys, hash_join, JoinParams};
 use crate::output::{DocOutput, FireqlOutput};
 use crate::planner::{
     build_aggregated_query_params, build_query_params, json_to_firestore_value_with_context,
@@ -128,7 +128,6 @@ async fn execute_join_select(
     )?;
     let left_docs_raw = db.query_doc(left_params).await?;
     let left_docs = docs_to_output(&left_docs_raw)?;
-    drop(left_docs_raw);
 
     let left_prefix = stmt.alias.as_deref().unwrap_or(&stmt.collection.name);
     let mut current_result = left_docs;
@@ -179,11 +178,14 @@ async fn execute_join_select(
         current_result = hash_join(
             &current_result,
             &right_docs,
-            &effective_left_field,
-            &join.right_field,
-            join.join_type,
-            left_prefix,
-            right_prefix,
+            &JoinParams {
+                left_field: &effective_left_field,
+                right_field: &join.right_field,
+                join_type: join.join_type,
+                left_prefix,
+                right_prefix,
+                prefix_left: !is_joined,
+            },
         );
 
         is_joined = true;

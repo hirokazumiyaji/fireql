@@ -372,6 +372,17 @@ fn parse_select(
     let (order_by, limit) =
         parse_order_and_limit_from_query_parts(Some(order_by_exprs), limit_expr)?;
 
+    if joins.is_some() && !order_by.is_empty() {
+        return Err(FireqlError::Unsupported(
+            "ORDER BY is not supported with JOIN".to_string(),
+        ));
+    }
+    if joins.is_some() && limit.is_some() {
+        return Err(FireqlError::Unsupported(
+            "LIMIT is not supported with JOIN".to_string(),
+        ));
+    }
+
     Ok(StatementAst::Select(SelectStatement {
         collection,
         alias,
@@ -1439,15 +1450,22 @@ mod tests {
     #[test]
     fn parse_join_with_order_by_and_limit() {
         let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id ORDER BY u.name LIMIT 10";
-        let stmt = parse_sql(sql).unwrap();
-        match stmt {
-            StatementAst::Select(select) => {
-                assert!(select.joins.is_some());
-                assert_eq!(select.order_by.len(), 1);
-                assert_eq!(select.limit, Some(10));
-            }
-            _ => panic!("expected select"),
-        }
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err.to_string().contains("ORDER BY is not supported with JOIN"));
+    }
+
+    #[test]
+    fn parse_join_rejects_order_by_with_join() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id ORDER BY u.name";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err.to_string().contains("ORDER BY is not supported with JOIN"));
+    }
+
+    #[test]
+    fn parse_join_rejects_limit_with_join() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id LIMIT 10";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err.to_string().contains("LIMIT is not supported with JOIN"));
     }
 
     #[test]
