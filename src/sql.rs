@@ -1423,6 +1423,69 @@ mod tests {
     }
 
     #[test]
+    fn parse_join_with_where() {
+        let sql =
+            "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id WHERE u.active = true";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert!(select.joins.is_some());
+                assert!(select.filter.is_some());
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_join_with_order_by_and_limit() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id ORDER BY u.name LIMIT 10";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert!(select.joins.is_some());
+                assert_eq!(select.order_by.len(), 1);
+                assert_eq!(select.limit, Some(10));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_left_outer_join() {
+        let sql = "SELECT * FROM users LEFT OUTER JOIN orders ON users.id = orders.user_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                let join = select.joins.as_ref().expect("should have join");
+                assert!(matches!(join[0].join_type, JoinType::Left));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_join_without_alias() {
+        let sql = "SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert!(select.alias.is_none());
+                let join = select.joins.as_ref().expect("should have join");
+                assert_eq!(join[0].left_alias.as_deref(), Some("users"));
+                assert_eq!(join[0].right_alias.as_deref(), Some("orders"));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_join_using_clause_rejected() {
+        let sql = "SELECT * FROM users INNER JOIN orders USING (id)";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err.to_string().contains("Only INNER JOIN and LEFT JOIN are supported"));
+    }
+
+    #[test]
     fn select_wildcard_with_fields_is_all() {
         let stmt = parse_sql("SELECT *, name FROM users").unwrap();
         match stmt {

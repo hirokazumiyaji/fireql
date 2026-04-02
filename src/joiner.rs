@@ -250,6 +250,79 @@ mod tests {
     }
 
     #[test]
+    fn extract_join_keys_with_missing_field() {
+        let docs = vec![
+            make_doc("u1", vec![("name", FireqlValue::String("Alice".into()))]),
+            make_doc("u2", vec![("dept", FireqlValue::String("eng".into()))]),
+        ];
+        let keys = extract_join_keys(&docs, "dept");
+        assert_eq!(keys.len(), 2);
+        assert!(keys.contains(&JoinKey::Null));
+        assert!(keys.contains(&JoinKey::String("eng".to_string())));
+    }
+
+    #[test]
+    fn extract_join_keys_empty_docs() {
+        let docs: Vec<DocOutput> = vec![];
+        let keys = extract_join_keys(&docs, "field");
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn hash_join_inner_no_matches() {
+        let left = vec![
+            make_doc("u1", vec![("dept_id", FireqlValue::String("d999".into()))]),
+        ];
+        let right = vec![
+            make_doc("d1", vec![("name", FireqlValue::String("Engineering".into()))]),
+        ];
+        let result = hash_join(&left, &right, "dept_id", "__name__", JoinType::Inner, "u", "d");
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn hash_join_left_all_unmatched() {
+        let left = vec![
+            make_doc("u1", vec![("dept_id", FireqlValue::String("d999".into()))]),
+            make_doc("u2", vec![("dept_id", FireqlValue::String("d998".into()))]),
+        ];
+        let right: Vec<DocOutput> = vec![];
+        let result = hash_join(&left, &right, "dept_id", "__name__", JoinType::Left, "u", "d");
+        assert_eq!(result.len(), 2);
+        assert!(!result[0].data.contains_key("d.name"));
+    }
+
+    #[test]
+    fn join_key_to_json_roundtrip() {
+        assert_eq!(
+            JoinKey::String("hello".into()).to_json_value(),
+            serde_json::Value::String("hello".into())
+        );
+        assert_eq!(JoinKey::Integer(42).to_json_value(), serde_json::json!(42));
+        assert_eq!(
+            JoinKey::Boolean(true).to_json_value(),
+            serde_json::Value::Bool(true)
+        );
+        assert_eq!(JoinKey::Null.to_json_value(), serde_json::Value::Null);
+    }
+
+    #[test]
+    fn chunk_keys_empty() {
+        let keys: Vec<JoinKey> = vec![];
+        let chunks = chunk_keys(&keys, 10);
+        assert!(chunks.is_empty());
+    }
+
+    #[test]
+    fn chunk_keys_exact_multiple() {
+        let keys: Vec<JoinKey> = (0..20).map(|i| JoinKey::String(format!("v{i}"))).collect();
+        let chunks = chunk_keys(&keys, 10);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].len(), 10);
+        assert_eq!(chunks[1].len(), 10);
+    }
+
+    #[test]
     fn hash_join_one_to_many() {
         let left = vec![
             make_doc("u1", vec![("name", FireqlValue::String("Alice".into()))]),
