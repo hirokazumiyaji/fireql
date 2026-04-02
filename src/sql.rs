@@ -359,12 +359,10 @@ fn parse_select(
     let (collection, alias, joins) = parse_table_with_joins_for_select(&select.from[0])?;
     let projection = parse_projection(&select.projection)?;
 
-    if joins.is_some() {
-        if matches!(projection, SelectProjection::Aggregations(_)) {
-            return Err(FireqlError::Unsupported(
-                "Aggregation with JOIN is not supported".to_string(),
-            ));
-        }
+    if joins.is_some() && matches!(projection, SelectProjection::Aggregations(_)) {
+        return Err(FireqlError::Unsupported(
+            "Aggregation with JOIN is not supported".to_string(),
+        ));
     }
 
     let filter = select
@@ -1378,7 +1376,7 @@ mod tests {
         match stmt {
             StatementAst::Select(select) => {
                 assert_eq!(select.alias.as_deref(), Some("u"));
-                let join = select.joins.as_ref().unwrap();
+                let join = select.joins.as_ref().expect("should have join");
                 assert_eq!(join[0].left_alias.as_deref(), Some("u"));
                 assert_eq!(join[0].right_alias.as_deref(), Some("o"));
             }
