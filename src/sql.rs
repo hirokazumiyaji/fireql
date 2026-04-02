@@ -1406,6 +1406,23 @@ mod tests {
     }
 
     #[test]
+    fn parse_join_with_qualified_fields() {
+        let sql = "SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                match &select.projection {
+                    SelectProjection::Fields(Projection::Fields(fields)) => {
+                        assert_eq!(fields, &["u.name", "o.amount"]);
+                    }
+                    _ => panic!("expected fields projection"),
+                }
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
     fn select_wildcard_with_fields_is_all() {
         let stmt = parse_sql("SELECT *, name FROM users").unwrap();
         match stmt {
