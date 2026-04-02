@@ -137,9 +137,17 @@ async fn execute_join_select(
 
     let left_prefix = stmt.alias.as_deref().unwrap_or(&stmt.collection.name);
     let mut current_result = left_docs;
+    let mut is_joined = false;
 
     for join in joins {
-        let keys = extract_join_keys(&current_result, &join.left_field);
+        let effective_left_field = if is_joined {
+            let alias = join.left_alias.as_deref().unwrap_or(left_prefix);
+            format!("{alias}.{}", join.left_field)
+        } else {
+            join.left_field.clone()
+        };
+
+        let keys = extract_join_keys(&current_result, &effective_left_field);
         if keys.is_empty() && join.join_type == crate::sql::JoinType::Inner {
             return Ok(FireqlOutput::Rows(vec![]));
         }
@@ -174,15 +182,6 @@ async fn execute_join_select(
 
         let right_prefix = join.right_alias.as_deref().unwrap_or(&join.collection.name);
 
-        let effective_left_field = if current_result
-            .first()
-            .is_some_and(|d| d.data.keys().any(|k| k.contains('.')))
-        {
-            format!("{left_prefix}.{}", join.left_field)
-        } else {
-            join.left_field.clone()
-        };
-
         current_result = hash_join(
             &current_result,
             &right_docs,
@@ -192,6 +191,8 @@ async fn execute_join_select(
             left_prefix,
             right_prefix,
         );
+
+        is_joined = true;
     }
 
     if let SelectProjection::Fields(Projection::Fields(ref fields)) = stmt.projection {
