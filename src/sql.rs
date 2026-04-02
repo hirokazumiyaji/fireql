@@ -1,9 +1,9 @@
 use crate::error::{FireqlError, Result};
 use serde_json::Value as JsonValue;
 use sqlparser::ast::{
-    AssignmentTarget, Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments, ObjectName,
-    ObjectNamePart, OrderByExpr, OrderByKind, Query, Select, SelectItem, SetExpr, Statement,
-    TableFactor, TableWithJoins, Value,
+    AssignmentTarget, Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
+    JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, OrderByExpr, OrderByKind, Query,
+    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -71,10 +71,12 @@ pub enum AggregationFunc {
 #[derive(Debug, Clone)]
 pub struct SelectStatement {
     pub collection: CollectionSpec,
+    pub alias: Option<String>,
     pub projection: SelectProjection,
     pub filter: Option<FilterExpr>,
     pub order_by: Vec<OrderBy>,
     pub limit: Option<u32>,
+    pub joins: Option<Vec<JoinSpec>>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +106,22 @@ pub struct OrderBy {
 pub enum OrderDirection {
     Asc,
     Desc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum JoinType {
+    Inner,
+    Left,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinSpec {
+    pub join_type: JoinType,
+    pub collection: CollectionSpec,
+    pub left_field: String,
+    pub right_field: String,
+    pub left_alias: Option<String>,
+    pub right_alias: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -338,8 +356,15 @@ fn parse_select(
         ));
     }
 
-    let collection = parse_table_with_joins(&select.from[0])?;
+    let (collection, alias, joins) = parse_table_with_joins_for_select(&select.from[0])?;
     let projection = parse_projection(&select.projection)?;
+
+    if joins.is_some() && matches!(projection, SelectProjection::Aggregations(_)) {
+        return Err(FireqlError::Unsupported(
+            "Aggregation with JOIN is not supported".to_string(),
+        ));
+    }
+
     let filter = select
         .selection
         .map(|expr| parse_filter_expr(&expr))
@@ -347,12 +372,25 @@ fn parse_select(
     let (order_by, limit) =
         parse_order_and_limit_from_query_parts(Some(order_by_exprs), limit_expr)?;
 
+    if joins.is_some() && !order_by.is_empty() {
+        return Err(FireqlError::Unsupported(
+            "ORDER BY is not supported with JOIN".to_string(),
+        ));
+    }
+    if joins.is_some() && limit.is_some() {
+        return Err(FireqlError::Unsupported(
+            "LIMIT is not supported with JOIN".to_string(),
+        ));
+    }
+
     Ok(StatementAst::Select(SelectStatement {
         collection,
+        alias,
         projection,
         filter,
         order_by,
         limit,
+        joins,
     }))
 }
 
@@ -363,6 +401,89 @@ fn parse_table_with_joins(table: &TableWithJoins) -> Result<CollectionSpec> {
         ));
     }
     parse_table_factor(&table.relation)
+}
+
+fn parse_table_with_joins_for_select(
+    table: &TableWithJoins,
+) -> Result<(CollectionSpec, Option<String>, Option<Vec<JoinSpec>>)> {
+    if table.joins.is_empty() {
+        let collection = parse_table_factor(&table.relation)?;
+        return Ok((collection, None, None));
+    }
+
+    let (collection, alias) = parse_table_factor_with_alias(&table.relation)?;
+    let mut join_specs = Vec::with_capacity(table.joins.len());
+
+    for join in &table.joins {
+        let join_type = match &join.join_operator {
+            JoinOperator::Inner(JoinConstraint::On(on_expr)) => (JoinType::Inner, on_expr),
+            JoinOperator::LeftOuter(JoinConstraint::On(on_expr)) => (JoinType::Left, on_expr),
+            JoinOperator::Left(JoinConstraint::On(on_expr)) => (JoinType::Left, on_expr),
+            _ => {
+                return Err(FireqlError::Unsupported(
+                    "Only INNER JOIN and LEFT JOIN are supported".to_string(),
+                ))
+            }
+        };
+
+        let (right_collection, right_alias) = parse_table_factor_with_alias(&join.relation)?;
+        let (left_alias_on, left_field, right_alias_on, right_field) =
+            parse_join_on_expr(join_type.1)?;
+
+        join_specs.push(JoinSpec {
+            join_type: join_type.0,
+            collection: right_collection,
+            left_field,
+            right_field,
+            left_alias: left_alias_on.or_else(|| alias.clone()),
+            right_alias: right_alias_on.or(right_alias),
+        });
+    }
+
+    Ok((collection, alias, Some(join_specs)))
+}
+
+fn parse_table_factor_with_alias(factor: &TableFactor) -> Result<(CollectionSpec, Option<String>)> {
+    match factor {
+        TableFactor::Table { name, alias, .. } => {
+            let collection = parse_object_name(name)?;
+            let alias_str = alias.as_ref().map(|a| a.name.value.clone());
+            Ok((collection, alias_str))
+        }
+        other => Err(FireqlError::Unsupported(format!(
+            "Unsupported FROM source: {other:?}"
+        ))),
+    }
+}
+
+fn parse_join_on_expr(expr: &Expr) -> Result<(Option<String>, String, Option<String>, String)> {
+    match expr {
+        Expr::BinaryOp { left, op, right } => {
+            if !matches!(op, sqlparser::ast::BinaryOperator::Eq) {
+                return Err(FireqlError::Unsupported(
+                    "Only equality conditions are supported in JOIN ON clause".to_string(),
+                ));
+            }
+            let (left_table, left_field) = parse_compound_ident_expr(left)?;
+            let (right_table, right_field) = parse_compound_ident_expr(right)?;
+            Ok((left_table, left_field, right_table, right_field))
+        }
+        _ => Err(FireqlError::Unsupported(
+            "Only equality conditions are supported in JOIN ON clause".to_string(),
+        )),
+    }
+}
+
+fn parse_compound_ident_expr(expr: &Expr) -> Result<(Option<String>, String)> {
+    match expr {
+        Expr::CompoundIdentifier(idents) if idents.len() == 2 => {
+            Ok((Some(idents[0].value.clone()), idents[1].value.clone()))
+        }
+        Expr::Identifier(ident) => Ok((None, ident.value.clone())),
+        _ => Err(FireqlError::Unsupported(
+            "JOIN ON clause requires table.field expressions".to_string(),
+        )),
+    }
 }
 
 fn parse_table_factor(factor: &TableFactor) -> Result<CollectionSpec> {
@@ -1224,6 +1345,166 @@ mod tests {
     fn offset_is_rejected() {
         let err = parse_sql("SELECT * FROM users LIMIT 10 OFFSET 20").unwrap_err();
         assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn parse_inner_join() {
+        let sql = "SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert_eq!(select.collection.name, "users");
+                let join = select.joins.as_ref().expect("should have join");
+                assert_eq!(join.len(), 1);
+                assert_eq!(join[0].collection.name, "orders");
+                assert!(matches!(join[0].join_type, JoinType::Inner));
+                assert_eq!(join[0].left_field, "id");
+                assert_eq!(join[0].right_field, "user_id");
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_left_join() {
+        let sql = "SELECT * FROM users LEFT JOIN orders ON users.id = orders.user_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                let join = select.joins.as_ref().expect("should have join");
+                assert!(matches!(join[0].join_type, JoinType::Left));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_join_with_alias() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert_eq!(select.alias.as_deref(), Some("u"));
+                let join = select.joins.as_ref().expect("should have join");
+                assert_eq!(join[0].left_alias.as_deref(), Some("u"));
+                assert_eq!(join[0].right_alias.as_deref(), Some("o"));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_join_rejects_unsupported_join_types() {
+        let sql = "SELECT * FROM users RIGHT JOIN orders ON users.id = orders.user_id";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Only INNER JOIN and LEFT JOIN are supported"));
+    }
+
+    #[test]
+    fn parse_join_rejects_non_equality_on() {
+        let sql = "SELECT * FROM users INNER JOIN orders ON users.id > orders.user_id";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err.to_string().contains("Only equality conditions"));
+    }
+
+    #[test]
+    fn parse_join_rejects_aggregation_with_join() {
+        let sql = "SELECT COUNT(*) FROM users INNER JOIN orders ON users.id = orders.user_id";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err.to_string().contains("Aggregation"));
+    }
+
+    #[test]
+    fn parse_join_with_qualified_fields() {
+        let sql = "SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => match &select.projection {
+                SelectProjection::Fields(Projection::Fields(fields)) => {
+                    assert_eq!(fields, &["u.name", "o.amount"]);
+                }
+                _ => panic!("expected fields projection"),
+            },
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_join_with_where() {
+        let sql =
+            "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id WHERE u.active = true";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert!(select.joins.is_some());
+                assert!(select.filter.is_some());
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_join_with_order_by_and_limit() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id ORDER BY u.name LIMIT 10";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("ORDER BY is not supported with JOIN"));
+    }
+
+    #[test]
+    fn parse_join_rejects_order_by_with_join() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id ORDER BY u.name";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("ORDER BY is not supported with JOIN"));
+    }
+
+    #[test]
+    fn parse_join_rejects_limit_with_join() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id LIMIT 10";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err.to_string().contains("LIMIT is not supported with JOIN"));
+    }
+
+    #[test]
+    fn parse_left_outer_join() {
+        let sql = "SELECT * FROM users LEFT OUTER JOIN orders ON users.id = orders.user_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                let join = select.joins.as_ref().expect("should have join");
+                assert!(matches!(join[0].join_type, JoinType::Left));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_join_without_alias() {
+        let sql = "SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id";
+        let stmt = parse_sql(sql).unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert!(select.alias.is_none());
+                let join = select.joins.as_ref().expect("should have join");
+                assert_eq!(join[0].left_alias.as_deref(), Some("users"));
+                assert_eq!(join[0].right_alias.as_deref(), Some("orders"));
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_join_using_clause_rejected() {
+        let sql = "SELECT * FROM users INNER JOIN orders USING (id)";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("Only INNER JOIN and LEFT JOIN are supported"));
     }
 
     #[test]
