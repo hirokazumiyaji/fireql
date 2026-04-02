@@ -1,10 +1,12 @@
 use crate::error::{FireqlError, Result};
+use crate::joiner::{chunk_keys, extract_join_keys, hash_join};
 use crate::output::{DocOutput, FireqlOutput};
 use crate::planner::{
     build_aggregated_query_params, build_query_params, json_to_firestore_value_with_context,
 };
 use crate::sql::{
-    CollectionSpec, FilterExpr, OrderBy, SelectProjection, StatementAst, FIREQL_CURRENT_TS_KEY,
+    CollectionSpec, FilterExpr, JoinSpec, OrderBy, Projection, SelectProjection, StatementAst,
+    FIREQL_CURRENT_TS_KEY,
 };
 use crate::value::FireqlValue;
 
@@ -71,6 +73,10 @@ async fn execute_select(
     db: &FirestoreDb,
     stmt: crate::sql::SelectStatement,
 ) -> Result<FireqlOutput> {
+    if let Some(ref joins) = stmt.joins {
+        return execute_join_select(db, &stmt, joins).await;
+    }
+
     match &stmt.projection {
         SelectProjection::Fields(projection) => {
             let params = build_query_params(
@@ -108,6 +114,99 @@ async fn execute_select(
             Ok(FireqlOutput::Aggregation(data))
         }
     }
+}
+
+async fn execute_join_select(
+    db: &FirestoreDb,
+    stmt: &crate::sql::SelectStatement,
+    joins: &[JoinSpec],
+) -> Result<FireqlOutput> {
+    let left_params = build_query_params(
+        &stmt.collection,
+        stmt.filter.as_ref(),
+        &stmt.order_by,
+        stmt.limit,
+        None,
+        Some(db.get_documents_path().as_str()),
+    )?;
+    let left_docs_raw = db.query_doc(left_params).await?;
+    let mut left_docs = Vec::with_capacity(left_docs_raw.len());
+    for doc in &left_docs_raw {
+        left_docs.push(doc_to_output(doc)?);
+    }
+
+    let left_prefix = stmt.alias.as_deref().unwrap_or(&stmt.collection.name);
+    let mut current_result = left_docs;
+
+    for join in joins {
+        let keys = extract_join_keys(&current_result, &join.left_field);
+        if keys.is_empty() && join.join_type == crate::sql::JoinType::Inner {
+            return Ok(FireqlOutput::Rows(vec![]));
+        }
+
+        let chunks = chunk_keys(&keys, 10);
+        let mut right_docs = Vec::new();
+
+        for chunk in chunks {
+            let in_values: Vec<serde_json::Value> =
+                chunk.iter().map(|k| k.to_json_value()).collect();
+
+            let in_filter = FilterExpr::InList {
+                field: join.right_field.clone(),
+                values: in_values,
+                negated: false,
+            };
+
+            let right_params = build_query_params(
+                &join.collection,
+                Some(&in_filter),
+                &[],
+                None,
+                None,
+                Some(db.get_documents_path().as_str()),
+            )?;
+
+            let chunk_docs = db.query_doc(right_params).await?;
+            for doc in &chunk_docs {
+                right_docs.push(doc_to_output(doc)?);
+            }
+        }
+
+        let right_prefix = join.right_alias.as_deref().unwrap_or(&join.collection.name);
+
+        let effective_left_field = if current_result
+            .first()
+            .is_some_and(|d| d.data.keys().any(|k| k.contains('.')))
+        {
+            format!("{left_prefix}.{}", join.left_field)
+        } else {
+            join.left_field.clone()
+        };
+
+        current_result = hash_join(
+            &current_result,
+            &right_docs,
+            &effective_left_field,
+            &join.right_field,
+            join.join_type,
+            left_prefix,
+            right_prefix,
+        );
+    }
+
+    if let SelectProjection::Fields(Projection::Fields(ref fields)) = stmt.projection {
+        for doc in &mut current_result {
+            let filtered: std::collections::HashMap<String, FireqlValue> = doc
+                .data
+                .iter()
+                .filter(|(k, _)| fields.iter().any(|f| k.as_str() == f.as_str()))
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            doc.data = filtered;
+        }
+    }
+
+    Ok(FireqlOutput::Rows(current_result))
 }
 
 #[derive(Clone)]
