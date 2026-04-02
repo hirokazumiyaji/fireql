@@ -32,18 +32,22 @@ impl JoinKey {
     }
 }
 
+fn doc_key(doc: &DocOutput, field: &str) -> JoinKey {
+    if field == "__name__" {
+        JoinKey::String(doc.id.clone())
+    } else {
+        match doc.data.get(field) {
+            Some(v) => JoinKey::from_fireql_value(v),
+            None => JoinKey::Null,
+        }
+    }
+}
+
 pub fn extract_join_keys(docs: &[DocOutput], field: &str) -> Vec<JoinKey> {
     let mut seen = HashSet::new();
     let mut keys = Vec::new();
     for doc in docs {
-        let key = if field == "__name__" {
-            JoinKey::String(doc.id.clone())
-        } else {
-            match doc.data.get(field) {
-                Some(v) => JoinKey::from_fireql_value(v),
-                None => JoinKey::Null,
-            }
-        };
+        let key = doc_key(doc, field);
         if seen.insert(key.clone()) {
             keys.push(key);
         }
@@ -75,32 +79,16 @@ pub fn hash_join(
 ) -> Vec<DocOutput> {
     let mut right_map: HashMap<JoinKey, Vec<&DocOutput>> = HashMap::new();
     for doc in right_docs {
-        let key = if right_field == "__name__" {
-            JoinKey::String(doc.id.clone())
-        } else {
-            match doc.data.get(right_field) {
-                Some(v) => JoinKey::from_fireql_value(v),
-                None => JoinKey::Null,
-            }
-        };
-        right_map.entry(key).or_default().push(doc);
+        right_map.entry(doc_key(doc, right_field)).or_default().push(doc);
     }
 
     let mut result = Vec::new();
     for left_doc in left_docs {
-        let left_key = if left_field == "__name__" {
-            JoinKey::String(left_doc.id.clone())
-        } else {
-            match left_doc.data.get(left_field) {
-                Some(v) => JoinKey::from_fireql_value(v),
-                None => JoinKey::Null,
-            }
-        };
-
-        let left_prefixed = prefix_fields(&left_doc.data, left_prefix);
+        let left_key = doc_key(left_doc, left_field);
 
         match right_map.get(&left_key) {
             Some(matches) => {
+                let left_prefixed = prefix_fields(&left_doc.data, left_prefix);
                 for right_doc in matches {
                     let mut merged = left_prefixed.clone();
                     merged.extend(prefix_fields(&right_doc.data, right_prefix));
@@ -111,15 +99,14 @@ pub fn hash_join(
                     });
                 }
             }
-            None => {
-                if join_type == JoinType::Left {
-                    result.push(DocOutput {
-                        id: left_doc.id.clone(),
-                        path: left_doc.path.clone(),
-                        data: left_prefixed,
-                    });
-                }
+            None if join_type == JoinType::Left => {
+                result.push(DocOutput {
+                    id: left_doc.id.clone(),
+                    path: left_doc.path.clone(),
+                    data: prefix_fields(&left_doc.data, left_prefix),
+                });
             }
+            None => {}
         }
     }
     result

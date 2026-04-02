@@ -18,8 +18,10 @@ use firestore::{
 use futures::stream::{self, StreamExt};
 use gcloud_sdk::google::firestore::v1::{document_transform, write, DocumentMask, Write};
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 
 const BATCH_LIMIT: usize = 500;
+const FIRESTORE_IN_LIMIT: usize = 10;
 
 struct FireqlWrite(Write);
 
@@ -89,12 +91,7 @@ async fn execute_select(
             )?;
 
             let docs = db.query_doc(params).await?;
-            let mut rows = Vec::with_capacity(docs.len());
-            for doc in docs {
-                rows.push(doc_to_output(&doc)?);
-            }
-
-            Ok(FireqlOutput::Rows(rows))
+            Ok(FireqlOutput::Rows(docs_to_output(&docs)?))
         }
         SelectProjection::Aggregations(aggregations) => {
             let params = build_aggregated_query_params(
@@ -130,10 +127,8 @@ async fn execute_join_select(
         Some(db.get_documents_path().as_str()),
     )?;
     let left_docs_raw = db.query_doc(left_params).await?;
-    let mut left_docs = Vec::with_capacity(left_docs_raw.len());
-    for doc in &left_docs_raw {
-        left_docs.push(doc_to_output(doc)?);
-    }
+    let left_docs = docs_to_output(&left_docs_raw)?;
+    drop(left_docs_raw);
 
     let left_prefix = stmt.alias.as_deref().unwrap_or(&stmt.collection.name);
     let mut current_result = left_docs;
@@ -152,7 +147,8 @@ async fn execute_join_select(
             return Ok(FireqlOutput::Rows(vec![]));
         }
 
-        let chunks = chunk_keys(&keys, 10);
+        let right_field = join.right_field.clone();
+        let chunks = chunk_keys(&keys, FIRESTORE_IN_LIMIT);
         let mut right_docs = Vec::new();
 
         for chunk in chunks {
@@ -160,7 +156,7 @@ async fn execute_join_select(
                 chunk.iter().map(|k| k.to_json_value()).collect();
 
             let in_filter = FilterExpr::InList {
-                field: join.right_field.clone(),
+                field: right_field.clone(),
                 values: in_values,
                 negated: false,
             };
@@ -175,9 +171,7 @@ async fn execute_join_select(
             )?;
 
             let chunk_docs = db.query_doc(right_params).await?;
-            for doc in &chunk_docs {
-                right_docs.push(doc_to_output(doc)?);
-            }
+            right_docs.extend(docs_to_output(&chunk_docs)?);
         }
 
         let right_prefix = join.right_alias.as_deref().unwrap_or(&join.collection.name);
@@ -196,14 +190,9 @@ async fn execute_join_select(
     }
 
     if let SelectProjection::Fields(Projection::Fields(ref fields)) = stmt.projection {
+        let field_set: HashSet<&str> = fields.iter().map(String::as_str).collect();
         for doc in &mut current_result {
-            let filtered: std::collections::HashMap<String, FireqlValue> = doc
-                .data
-                .iter()
-                .filter(|(k, _)| fields.iter().any(|f| k.as_str() == f.as_str()))
-                .map(|(k, v)| (k.clone(), v.clone()))
-                .collect();
-            doc.data = filtered;
+            doc.data.retain(|k, _| field_set.contains(k.as_str()));
         }
     }
 
@@ -347,6 +336,10 @@ fn is_current_timestamp_value(value: &JsonValue) -> bool {
         JsonValue::Object(map) => map.contains_key(FIREQL_CURRENT_TS_KEY),
         _ => false,
     }
+}
+
+fn docs_to_output(docs: &[gcloud_sdk::google::firestore::v1::Document]) -> Result<Vec<DocOutput>> {
+    docs.iter().map(doc_to_output).collect()
 }
 
 fn doc_to_output(doc: &gcloud_sdk::google::firestore::v1::Document) -> Result<DocOutput> {
