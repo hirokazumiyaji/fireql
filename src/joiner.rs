@@ -103,17 +103,19 @@ pub fn hash_join(
         }
     };
 
+    let emit_left = |doc: &DocOutput, data: HashMap<String, FireqlValue>| DocOutput {
+        id: doc.id.clone(),
+        path: doc.path.clone(),
+        data,
+    };
+
     let mut result = Vec::new();
     for left_doc in left_docs {
         let left_key = doc_key(left_doc, left_field);
 
         if left_key == JoinKey::Null {
             if *join_type == JoinType::Left {
-                result.push(DocOutput {
-                    id: left_doc.id.clone(),
-                    path: left_doc.path.clone(),
-                    data: left_data(left_doc),
-                });
+                result.push(emit_left(left_doc, left_data(left_doc)));
             }
             continue;
         }
@@ -123,20 +125,14 @@ pub fn hash_join(
                 let left_prefixed = left_data(left_doc);
                 for right_doc in matches {
                     let mut merged = left_prefixed.clone();
-                    merged.extend(prefix_fields(&right_doc.data, right_prefix));
-                    result.push(DocOutput {
-                        id: left_doc.id.clone(),
-                        path: left_doc.path.clone(),
-                        data: merged,
-                    });
+                    merged.extend(
+                        right_doc.data.iter().map(|(k, v)| (format!("{right_prefix}.{k}"), v.clone()))
+                    );
+                    result.push(emit_left(left_doc, merged));
                 }
             }
             None if *join_type == JoinType::Left => {
-                result.push(DocOutput {
-                    id: left_doc.id.clone(),
-                    path: left_doc.path.clone(),
-                    data: left_data(left_doc),
-                });
+                result.push(emit_left(left_doc, left_data(left_doc)));
             }
             None => {}
         }

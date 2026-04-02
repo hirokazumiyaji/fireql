@@ -146,7 +146,6 @@ async fn execute_join_select(
             return Ok(FireqlOutput::Rows(vec![]));
         }
 
-        let right_field = join.right_field.clone();
         let chunks = chunk_keys(&keys, FIRESTORE_IN_LIMIT);
         let mut right_docs = Vec::new();
 
@@ -155,7 +154,7 @@ async fn execute_join_select(
                 chunk.iter().map(|k| k.to_json_value()).collect();
 
             let in_filter = FilterExpr::InList {
-                field: right_field.clone(),
+                field: join.right_field.clone(),
                 values: in_values,
                 negated: false,
             };
