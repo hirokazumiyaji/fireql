@@ -85,7 +85,14 @@ pub fn hash_join(
     right_docs: &[DocOutput],
     params: &JoinParams<'_>,
 ) -> Vec<DocOutput> {
-    let JoinParams { left_field, right_field, join_type, left_prefix, right_prefix, prefix_left } = params;
+    let JoinParams {
+        left_field,
+        right_field,
+        join_type,
+        left_prefix,
+        right_prefix,
+        prefix_left,
+    } = params;
     let mut right_map: HashMap<JoinKey, Vec<&DocOutput>> = HashMap::new();
     for doc in right_docs {
         let key = doc_key(doc, right_field);
@@ -126,7 +133,10 @@ pub fn hash_join(
                 for right_doc in matches {
                     let mut merged = left_prefixed.clone();
                     merged.extend(
-                        right_doc.data.iter().map(|(k, v)| (format!("{right_prefix}.{k}"), v.clone()))
+                        right_doc
+                            .data
+                            .iter()
+                            .map(|(k, v)| (format!("{right_prefix}.{k}"), v.clone())),
                     );
                     result.push(emit_left(left_doc, merged));
                 }
@@ -161,7 +171,14 @@ mod tests {
         right_prefix: &'a str,
         prefix_left: bool,
     ) -> JoinParams<'a> {
-        JoinParams { left_field, right_field, join_type, left_prefix, right_prefix, prefix_left }
+        JoinParams {
+            left_field,
+            right_field,
+            join_type,
+            left_prefix,
+            right_prefix,
+            prefix_left,
+        }
     }
 
     #[test]
@@ -200,25 +217,51 @@ mod tests {
     #[test]
     fn hash_join_inner() {
         let left = vec![
-            make_doc("u1", vec![
-                ("name", FireqlValue::String("Alice".into())),
-                ("dept_id", FireqlValue::String("d1".into())),
-            ]),
-            make_doc("u2", vec![
-                ("name", FireqlValue::String("Bob".into())),
-                ("dept_id", FireqlValue::String("d2".into())),
-            ]),
-            make_doc("u3", vec![
-                ("name", FireqlValue::String("Charlie".into())),
-                ("dept_id", FireqlValue::String("d999".into())),
-            ]),
+            make_doc(
+                "u1",
+                vec![
+                    ("name", FireqlValue::String("Alice".into())),
+                    ("dept_id", FireqlValue::String("d1".into())),
+                ],
+            ),
+            make_doc(
+                "u2",
+                vec![
+                    ("name", FireqlValue::String("Bob".into())),
+                    ("dept_id", FireqlValue::String("d2".into())),
+                ],
+            ),
+            make_doc(
+                "u3",
+                vec![
+                    ("name", FireqlValue::String("Charlie".into())),
+                    ("dept_id", FireqlValue::String("d999".into())),
+                ],
+            ),
         ];
         let right = vec![
-            make_doc("d1", vec![("dept_name", FireqlValue::String("Engineering".into()))]),
-            make_doc("d2", vec![("dept_name", FireqlValue::String("Sales".into()))]),
+            make_doc(
+                "d1",
+                vec![("dept_name", FireqlValue::String("Engineering".into()))],
+            ),
+            make_doc(
+                "d2",
+                vec![("dept_name", FireqlValue::String("Sales".into()))],
+            ),
         ];
 
-        let result = hash_join(&left, &right, &jp("dept_id", "__name__", JoinType::Inner, "users", "departments", true));
+        let result = hash_join(
+            &left,
+            &right,
+            &jp(
+                "dept_id",
+                "__name__",
+                JoinType::Inner,
+                "users",
+                "departments",
+                true,
+            ),
+        );
         assert_eq!(result.len(), 2);
         assert!(result[0].data.contains_key("users.name"));
         assert!(result[0].data.contains_key("departments.dept_name"));
@@ -231,11 +274,23 @@ mod tests {
             make_doc("u1", vec![("dept_id", FireqlValue::String("d1".into()))]),
             make_doc("u2", vec![("dept_id", FireqlValue::String("d999".into()))]),
         ];
-        let right = vec![
-            make_doc("d1", vec![("dept_name", FireqlValue::String("Engineering".into()))]),
-        ];
+        let right = vec![make_doc(
+            "d1",
+            vec![("dept_name", FireqlValue::String("Engineering".into()))],
+        )];
 
-        let result = hash_join(&left, &right, &jp("dept_id", "__name__", JoinType::Left, "users", "departments", true));
+        let result = hash_join(
+            &left,
+            &right,
+            &jp(
+                "dept_id",
+                "__name__",
+                JoinType::Left,
+                "users",
+                "departments",
+                true,
+            ),
+        );
         assert_eq!(result.len(), 2);
         assert!(result[0].data.contains_key("departments.dept_name"));
         assert!(!result[1].data.contains_key("departments.dept_name"));
@@ -253,26 +308,56 @@ mod tests {
             make_doc("o2", vec![("amount", FireqlValue::Integer(200))]),
         ];
 
-        let result = hash_join(&left, &right, &jp("order_id", "__name__", JoinType::Inner, "users", "orders", true));
+        let result = hash_join(
+            &left,
+            &right,
+            &jp(
+                "order_id",
+                "__name__",
+                JoinType::Inner,
+                "users",
+                "orders",
+                true,
+            ),
+        );
         assert_eq!(result.len(), 2);
-        assert_eq!(result[0].data.get("orders.amount"), Some(&FireqlValue::Integer(100)));
+        assert_eq!(
+            result[0].data.get("orders.amount"),
+            Some(&FireqlValue::Integer(100))
+        );
     }
 
     #[test]
     fn hash_join_left_side_by_document_id() {
-        let left = vec![
-            make_doc("u1", vec![("name", FireqlValue::String("Alice".into()))]),
-        ];
-        let right = vec![
-            make_doc("r1", vec![
+        let left = vec![make_doc(
+            "u1",
+            vec![("name", FireqlValue::String("Alice".into()))],
+        )];
+        let right = vec![make_doc(
+            "r1",
+            vec![
                 ("user_id", FireqlValue::String("u1".into())),
                 ("score", FireqlValue::Integer(95)),
-            ]),
-        ];
+            ],
+        )];
 
-        let result = hash_join(&left, &right, &jp("__name__", "user_id", JoinType::Inner, "users", "reviews", true));
+        let result = hash_join(
+            &left,
+            &right,
+            &jp(
+                "__name__",
+                "user_id",
+                JoinType::Inner,
+                "users",
+                "reviews",
+                true,
+            ),
+        );
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].data.get("reviews.score"), Some(&FireqlValue::Integer(95)));
+        assert_eq!(
+            result[0].data.get("reviews.score"),
+            Some(&FireqlValue::Integer(95))
+        );
     }
 
     #[test]
@@ -295,13 +380,19 @@ mod tests {
 
     #[test]
     fn hash_join_inner_no_matches() {
-        let left = vec![
-            make_doc("u1", vec![("dept_id", FireqlValue::String("d999".into()))]),
-        ];
-        let right = vec![
-            make_doc("d1", vec![("name", FireqlValue::String("Engineering".into()))]),
-        ];
-        let result = hash_join(&left, &right, &jp("dept_id", "__name__", JoinType::Inner, "u", "d", true));
+        let left = vec![make_doc(
+            "u1",
+            vec![("dept_id", FireqlValue::String("d999".into()))],
+        )];
+        let right = vec![make_doc(
+            "d1",
+            vec![("name", FireqlValue::String("Engineering".into()))],
+        )];
+        let result = hash_join(
+            &left,
+            &right,
+            &jp("dept_id", "__name__", JoinType::Inner, "u", "d", true),
+        );
         assert!(result.is_empty());
     }
 
@@ -312,7 +403,11 @@ mod tests {
             make_doc("u2", vec![("dept_id", FireqlValue::String("d998".into()))]),
         ];
         let right: Vec<DocOutput> = vec![];
-        let result = hash_join(&left, &right, &jp("dept_id", "__name__", JoinType::Left, "u", "d", true));
+        let result = hash_join(
+            &left,
+            &right,
+            &jp("dept_id", "__name__", JoinType::Left, "u", "d", true),
+        );
         assert_eq!(result.len(), 2);
         assert!(!result[0].data.contains_key("d.name"));
     }
@@ -349,15 +444,17 @@ mod tests {
 
     #[test]
     fn hash_join_null_keys_do_not_match() {
-        let left = vec![
-            make_doc("u1", vec![]),
-            make_doc("u2", vec![]),
-        ];
-        let right = vec![
-            make_doc("d1", vec![]),
-        ];
-        let result = hash_join(&left, &right, &jp("dept_id", "id", JoinType::Inner, "l", "r", true));
-        assert!(result.is_empty(), "NULL should not match NULL in INNER JOIN");
+        let left = vec![make_doc("u1", vec![]), make_doc("u2", vec![])];
+        let right = vec![make_doc("d1", vec![])];
+        let result = hash_join(
+            &left,
+            &right,
+            &jp("dept_id", "id", JoinType::Inner, "l", "r", true),
+        );
+        assert!(
+            result.is_empty(),
+            "NULL should not match NULL in INNER JOIN"
+        );
     }
 
     #[test]
@@ -366,10 +463,15 @@ mod tests {
             make_doc("u1", vec![("dept_id", FireqlValue::String("d1".into()))]),
             make_doc("u2", vec![]),
         ];
-        let right = vec![
-            make_doc("d1", vec![("name", FireqlValue::String("Eng".into()))]),
-        ];
-        let result = hash_join(&left, &right, &jp("dept_id", "__name__", JoinType::Left, "l", "r", true));
+        let right = vec![make_doc(
+            "d1",
+            vec![("name", FireqlValue::String("Eng".into()))],
+        )];
+        let result = hash_join(
+            &left,
+            &right,
+            &jp("dept_id", "__name__", JoinType::Left, "l", "r", true),
+        );
         assert_eq!(result.len(), 2);
         assert!(result[0].data.contains_key("r.name"));
         assert!(!result[1].data.contains_key("r.name"));
@@ -397,44 +499,95 @@ mod tests {
 
     #[test]
     fn hash_join_already_prefixed_data_not_double_prefixed() {
-        let left = vec![
-            DocOutput {
-                id: "u1".to_string(),
-                path: "users/u1".to_string(),
-                data: vec![
-                    ("users.name".to_string(), FireqlValue::String("Alice".into())),
-                    ("orders.amount".to_string(), FireqlValue::Integer(100)),
-                    ("orders.product_id".to_string(), FireqlValue::String("p1".into())),
-                ].into_iter().collect(),
-            },
-        ];
-        let right = vec![
-            make_doc("p1", vec![("product_name", FireqlValue::String("Widget".into()))]),
-        ];
+        let left = vec![DocOutput {
+            id: "u1".to_string(),
+            path: "users/u1".to_string(),
+            data: vec![
+                (
+                    "users.name".to_string(),
+                    FireqlValue::String("Alice".into()),
+                ),
+                ("orders.amount".to_string(), FireqlValue::Integer(100)),
+                (
+                    "orders.product_id".to_string(),
+                    FireqlValue::String("p1".into()),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        }];
+        let right = vec![make_doc(
+            "p1",
+            vec![("product_name", FireqlValue::String("Widget".into()))],
+        )];
 
         let result = hash_join(
-            &left, &right,
-            &jp("orders.product_id", "__name__", JoinType::Inner, "users", "products", false),
+            &left,
+            &right,
+            &jp(
+                "orders.product_id",
+                "__name__",
+                JoinType::Inner,
+                "users",
+                "products",
+                false,
+            ),
         );
 
         assert_eq!(result.len(), 1);
-        assert!(result[0].data.contains_key("users.name"), "should keep original users.name prefix");
-        assert!(result[0].data.contains_key("orders.amount"), "should keep original orders.amount prefix");
-        assert!(result[0].data.contains_key("products.product_name"), "right side should get products prefix");
-        assert!(!result[0].data.contains_key("users.users.name"), "should NOT double-prefix");
+        assert!(
+            result[0].data.contains_key("users.name"),
+            "should keep original users.name prefix"
+        );
+        assert!(
+            result[0].data.contains_key("orders.amount"),
+            "should keep original orders.amount prefix"
+        );
+        assert!(
+            result[0].data.contains_key("products.product_name"),
+            "right side should get products prefix"
+        );
+        assert!(
+            !result[0].data.contains_key("users.users.name"),
+            "should NOT double-prefix"
+        );
     }
 
     #[test]
     fn hash_join_one_to_many() {
-        let left = vec![
-            make_doc("u1", vec![("name", FireqlValue::String("Alice".into()))]),
-        ];
+        let left = vec![make_doc(
+            "u1",
+            vec![("name", FireqlValue::String("Alice".into()))],
+        )];
         let right = vec![
-            make_doc("o1", vec![("user_id", FireqlValue::String("u1".into())), ("amount", FireqlValue::Integer(100))]),
-            make_doc("o2", vec![("user_id", FireqlValue::String("u1".into())), ("amount", FireqlValue::Integer(200))]),
+            make_doc(
+                "o1",
+                vec![
+                    ("user_id", FireqlValue::String("u1".into())),
+                    ("amount", FireqlValue::Integer(100)),
+                ],
+            ),
+            make_doc(
+                "o2",
+                vec![
+                    ("user_id", FireqlValue::String("u1".into())),
+                    ("amount", FireqlValue::Integer(200)),
+                ],
+            ),
         ];
 
-        let result = hash_join(&left, &right, &jp("__name__", "user_id", JoinType::Inner, "users", "orders", true));
+        let result = hash_join(
+            &left,
+            &right,
+            &jp(
+                "__name__",
+                "user_id",
+                JoinType::Inner,
+                "users",
+                "orders",
+                true,
+            ),
+        );
         assert_eq!(result.len(), 2);
     }
 }

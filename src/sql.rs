@@ -2,8 +2,8 @@ use crate::error::{FireqlError, Result};
 use serde_json::Value as JsonValue;
 use sqlparser::ast::{
     AssignmentTarget, Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
-    JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, OrderByExpr,
-    OrderByKind, Query, Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
+    JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, OrderByExpr, OrderByKind, Query,
+    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -456,9 +456,7 @@ fn parse_table_factor_with_alias(factor: &TableFactor) -> Result<(CollectionSpec
     }
 }
 
-fn parse_join_on_expr(
-    expr: &Expr,
-) -> Result<(Option<String>, String, Option<String>, String)> {
+fn parse_join_on_expr(expr: &Expr) -> Result<(Option<String>, String, Option<String>, String)> {
     match expr {
         Expr::BinaryOp { left, op, right } => {
             if !matches!(op, sqlparser::ast::BinaryOperator::Eq) {
@@ -1399,7 +1397,9 @@ mod tests {
     fn parse_join_rejects_unsupported_join_types() {
         let sql = "SELECT * FROM users RIGHT JOIN orders ON users.id = orders.user_id";
         let err = parse_sql(sql).unwrap_err();
-        assert!(err.to_string().contains("Only INNER JOIN and LEFT JOIN are supported"));
+        assert!(err
+            .to_string()
+            .contains("Only INNER JOIN and LEFT JOIN are supported"));
     }
 
     #[test]
@@ -1421,14 +1421,12 @@ mod tests {
         let sql = "SELECT u.name, o.amount FROM users u INNER JOIN orders o ON u.id = o.user_id";
         let stmt = parse_sql(sql).unwrap();
         match stmt {
-            StatementAst::Select(select) => {
-                match &select.projection {
-                    SelectProjection::Fields(Projection::Fields(fields)) => {
-                        assert_eq!(fields, &["u.name", "o.amount"]);
-                    }
-                    _ => panic!("expected fields projection"),
+            StatementAst::Select(select) => match &select.projection {
+                SelectProjection::Fields(Projection::Fields(fields)) => {
+                    assert_eq!(fields, &["u.name", "o.amount"]);
                 }
-            }
+                _ => panic!("expected fields projection"),
+            },
             _ => panic!("expected select"),
         }
     }
@@ -1451,14 +1449,18 @@ mod tests {
     fn parse_join_with_order_by_and_limit() {
         let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id ORDER BY u.name LIMIT 10";
         let err = parse_sql(sql).unwrap_err();
-        assert!(err.to_string().contains("ORDER BY is not supported with JOIN"));
+        assert!(err
+            .to_string()
+            .contains("ORDER BY is not supported with JOIN"));
     }
 
     #[test]
     fn parse_join_rejects_order_by_with_join() {
         let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id ORDER BY u.name";
         let err = parse_sql(sql).unwrap_err();
-        assert!(err.to_string().contains("ORDER BY is not supported with JOIN"));
+        assert!(err
+            .to_string()
+            .contains("ORDER BY is not supported with JOIN"));
     }
 
     #[test]
@@ -1500,7 +1502,9 @@ mod tests {
     fn parse_join_using_clause_rejected() {
         let sql = "SELECT * FROM users INNER JOIN orders USING (id)";
         let err = parse_sql(sql).unwrap_err();
-        assert!(err.to_string().contains("Only INNER JOIN and LEFT JOIN are supported"));
+        assert!(err
+            .to_string()
+            .contains("Only INNER JOIN and LEFT JOIN are supported"));
     }
 
     #[test]

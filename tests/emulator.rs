@@ -221,9 +221,8 @@ async fn emulator_inner_join() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-    let sql = format!(
-        "SELECT * FROM {users_col} u INNER JOIN {orders_col} o ON u.__name__ = o.user_id"
-    );
+    let sql =
+        format!("SELECT * FROM {users_col} u INNER JOIN {orders_col} o ON u.__name__ = o.user_id");
     let output = fireql.execute(&sql).await?;
     match output {
         FireqlOutput::Rows(rows) => {
@@ -279,9 +278,8 @@ async fn emulator_left_join() -> Result<(), Box<dyn std::error::Error>> {
         )
         .await?;
 
-    let sql = format!(
-        "SELECT * FROM {users_col} u LEFT JOIN {orders_col} o ON u.__name__ = o.user_id"
-    );
+    let sql =
+        format!("SELECT * FROM {users_col} u LEFT JOIN {orders_col} o ON u.__name__ = o.user_id");
     let output = fireql.execute(&sql).await?;
     match output {
         FireqlOutput::Rows(rows) => {
