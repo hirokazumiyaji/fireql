@@ -70,7 +70,7 @@ impl FireqlValue {
                 base64::engine::general_purpose::STANDARD.encode(b)
             }
             Self::Timestamp(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
-            Self::Reference(r) => r.clone(),
+            Self::Reference(r) => to_relative_path(r).to_string(),
             Self::GeoPoint { .. } | Self::Array(_) | Self::Map(_) => {
                 serde_json::to_string(&plain_json_value(self))
                     .expect("structured value serialization cannot fail")
@@ -322,11 +322,19 @@ mod tests {
     }
 
     #[test]
-    fn plain_string_reference() {
+    fn plain_string_reference_uses_relative_path() {
         assert_eq!(
-            FireqlValue::Reference("projects/p/databases/d/documents/c/id".to_string())
+            FireqlValue::Reference("projects/p/databases/(default)/documents/users/u1".to_string())
                 .to_plain_string(),
-            "projects/p/databases/d/documents/c/id"
+            "users/u1"
+        );
+    }
+
+    #[test]
+    fn plain_string_reference_fallback() {
+        assert_eq!(
+            FireqlValue::Reference("some/other/path".to_string()).to_plain_string(),
+            "some/other/path"
         );
     }
 
