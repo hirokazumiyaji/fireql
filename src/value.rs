@@ -184,9 +184,8 @@ mod tests {
 
     #[test]
     fn test_serialize_reference_normal() {
-        let val = FireqlValue::Reference(
-            "projects/p/databases/(default)/documents/users/u1".to_string(),
-        );
+        let val =
+            FireqlValue::Reference("projects/p/databases/(default)/documents/users/u1".to_string());
         let json = serde_json::to_value(&val).unwrap();
         assert_eq!(json["_firestore_type"], "reference");
         assert_eq!(json["value"], "users/u1");
