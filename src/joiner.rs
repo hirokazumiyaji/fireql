@@ -490,7 +490,7 @@ mod tests {
 
     #[test]
     fn join_key_from_unsupported_type_returns_null() {
-        let key = JoinKey::from_fireql_value(&FireqlValue::Double(3.14));
+        let key = JoinKey::from_fireql_value(&FireqlValue::Double(1.23));
         assert_eq!(key, JoinKey::Null);
 
         let key = JoinKey::from_fireql_value(&FireqlValue::Array(vec![]));
