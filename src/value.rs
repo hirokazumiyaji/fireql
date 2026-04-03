@@ -61,6 +61,9 @@ impl FireqlValue {
 
 fn to_relative_path(full_path: &str) -> &str {
     const MARKER: &str = "/documents/";
+    if !full_path.starts_with("projects/") {
+        return full_path;
+    }
     match full_path.find(MARKER) {
         Some(pos) => &full_path[pos + MARKER.len()..],
         None => full_path,
@@ -205,5 +208,11 @@ mod tests {
         let val = FireqlValue::Reference("some/other/path".to_string());
         let json = serde_json::to_value(&val).unwrap();
         assert_eq!(json["value"], "some/other/path");
+    }
+
+    #[test]
+    fn test_to_relative_path_non_resource_with_documents_segment() {
+        let path = "users/documents/u1";
+        assert_eq!(to_relative_path(path), "users/documents/u1");
     }
 }
