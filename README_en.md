@@ -99,7 +99,7 @@ All values are serialized with a `_firestore_type` tag, including primitive type
       },
       "profile_ref": {
         "_firestore_type": "reference",
-        "value": "projects/my-project/databases/(default)/documents/profiles/user1"
+        "value": "profiles/user1"
       }
     }
   }

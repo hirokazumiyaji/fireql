@@ -99,7 +99,7 @@ println!("{}", serde_json::to_string_pretty(&output)?);
       },
       "profile_ref": {
         "_firestore_type": "reference",
-        "value": "projects/my-project/databases/(default)/documents/profiles/user1"
+        "value": "profiles/user1"
       }
     }
   }
