@@ -1,11 +1,13 @@
 mod error;
 mod executor;
+pub mod format;
 mod output;
 mod planner;
 mod sql;
 mod value;
 
 pub use error::{FireqlError, Result};
+pub use format::Format;
 pub use output::{DocOutput, FireqlOutput};
 pub use value::FireqlValue;
 

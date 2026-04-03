@@ -22,6 +22,8 @@ pub enum FireqlError {
     Serde(#[from] serde_json::Error),
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+    #[error("Format error: {0}")]
+    Format(String),
 }
 
 pub type Result<T> = std::result::Result<T, FireqlError>;

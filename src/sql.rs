@@ -235,7 +235,7 @@ fn try_parse_delete_collection_group(input: &str) -> Result<Option<StatementAst>
         return Ok(None);
     }
 
-    let select_sql = format!("SELECT * {}", rest_trimmed);
+    let select_sql = format!("SELECT * {rest_trimmed}");
 
     let dialect = GenericDialect {};
     let mut statements = Parser::parse_sql(&dialect, &select_sql)

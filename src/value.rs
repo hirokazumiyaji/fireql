@@ -57,6 +57,26 @@ impl FireqlValue {
             .map(|(k, v)| (k.clone(), Self::from_proto(v)))
             .collect()
     }
+
+    pub fn to_plain_string(&self) -> String {
+        match self {
+            Self::Null => String::new(),
+            Self::Boolean(b) => b.to_string(),
+            Self::Integer(i) => i.to_string(),
+            Self::Double(d) => d.to_string(),
+            Self::String(s) => s.clone(),
+            Self::Bytes(b) => {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD.encode(b)
+            }
+            Self::Timestamp(dt) => dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            Self::Reference(r) => r.clone(),
+            Self::GeoPoint { .. } | Self::Array(_) | Self::Map(_) => {
+                serde_json::to_string(&plain_json_value(self))
+                    .expect("structured value serialization cannot fail")
+            }
+        }
+    }
 }
 
 fn to_relative_path(full_path: &str) -> &str {
@@ -151,6 +171,44 @@ impl Serialize for FireqlValue {
     }
 }
 
+fn plain_json_value(v: &FireqlValue) -> serde_json::Value {
+    match v {
+        FireqlValue::Null => serde_json::Value::Null,
+        FireqlValue::Boolean(b) => serde_json::Value::from(*b),
+        FireqlValue::Integer(i) => serde_json::Value::from(*i),
+        FireqlValue::Double(d) => {
+            if d.is_finite() {
+                serde_json::json!(*d)
+            } else {
+                serde_json::Value::from(d.to_string())
+            }
+        }
+        FireqlValue::String(s) => serde_json::Value::from(s.as_str()),
+        FireqlValue::Bytes(b) => {
+            use base64::Engine;
+            serde_json::Value::from(base64::engine::general_purpose::STANDARD.encode(b))
+        }
+        FireqlValue::Timestamp(dt) => {
+            serde_json::Value::from(dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true))
+        }
+        FireqlValue::Reference(r) => serde_json::Value::from(r.as_str()),
+        FireqlValue::GeoPoint {
+            latitude,
+            longitude,
+        } => serde_json::json!({"latitude": latitude, "longitude": longitude}),
+        FireqlValue::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(plain_json_value).collect())
+        }
+        FireqlValue::Map(map) => {
+            let obj: serde_json::Map<String, serde_json::Value> = map
+                .iter()
+                .map(|(k, v)| (k.clone(), plain_json_value(v)))
+                .collect();
+            serde_json::Value::Object(obj)
+        }
+    }
+}
+
 struct TypedArray<'a>(&'a [FireqlValue]);
 
 impl Serialize for TypedArray<'_> {
@@ -214,5 +272,102 @@ mod tests {
     fn test_to_relative_path_non_resource_with_documents_segment() {
         let path = "users/documents/u1";
         assert_eq!(to_relative_path(path), "users/documents/u1");
+    }
+
+    #[test]
+    fn plain_string_null() {
+        assert_eq!(FireqlValue::Null.to_plain_string(), "");
+    }
+
+    #[test]
+    fn plain_string_boolean() {
+        assert_eq!(FireqlValue::Boolean(true).to_plain_string(), "true");
+        assert_eq!(FireqlValue::Boolean(false).to_plain_string(), "false");
+    }
+
+    #[test]
+    fn plain_string_integer() {
+        assert_eq!(FireqlValue::Integer(42).to_plain_string(), "42");
+        assert_eq!(FireqlValue::Integer(-1).to_plain_string(), "-1");
+    }
+
+    #[test]
+    fn plain_string_double() {
+        assert_eq!(FireqlValue::Double(2.5).to_plain_string(), "2.5");
+    }
+
+    #[test]
+    fn plain_string_string() {
+        assert_eq!(
+            FireqlValue::String("hello".to_string()).to_plain_string(),
+            "hello"
+        );
+    }
+
+    #[test]
+    fn plain_string_bytes() {
+        use base64::Engine;
+        let data = vec![0xDE, 0xAD, 0xBE, 0xEF];
+        let expected = base64::engine::general_purpose::STANDARD.encode(&data);
+        assert_eq!(FireqlValue::Bytes(data).to_plain_string(), expected);
+    }
+
+    #[test]
+    fn plain_string_timestamp() {
+        let dt = chrono::DateTime::from_timestamp(1704067200, 0).unwrap();
+        assert_eq!(
+            FireqlValue::Timestamp(dt).to_plain_string(),
+            "2024-01-01T00:00:00Z"
+        );
+    }
+
+    #[test]
+    fn plain_string_reference() {
+        assert_eq!(
+            FireqlValue::Reference("projects/p/databases/d/documents/c/id".to_string())
+                .to_plain_string(),
+            "projects/p/databases/d/documents/c/id"
+        );
+    }
+
+    #[test]
+    fn plain_string_geopoint() {
+        let v = FireqlValue::GeoPoint {
+            latitude: 40.7128,
+            longitude: -74.006,
+        };
+        assert_eq!(
+            v.to_plain_string(),
+            r#"{"latitude":40.7128,"longitude":-74.006}"#
+        );
+    }
+
+    #[test]
+    fn plain_string_array() {
+        let v = FireqlValue::Array(vec![
+            FireqlValue::String("a".to_string()),
+            FireqlValue::Integer(1),
+        ]);
+        assert_eq!(v.to_plain_string(), r#"["a",1]"#);
+    }
+
+    #[test]
+    fn plain_string_map() {
+        let mut m = HashMap::new();
+        m.insert("key".to_string(), FireqlValue::Integer(42));
+        let v = FireqlValue::Map(m);
+        assert_eq!(v.to_plain_string(), r#"{"key":42}"#);
+    }
+
+    #[test]
+    fn plain_string_string_with_control_chars() {
+        let v = FireqlValue::Array(vec![
+            FireqlValue::String("line1\nline2".to_string()),
+            FireqlValue::String("tab\there".to_string()),
+        ]);
+        let result = v.to_plain_string();
+        let parsed: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(parsed[0], "line1\nline2");
+        assert_eq!(parsed[1], "tab\there");
     }
 }
