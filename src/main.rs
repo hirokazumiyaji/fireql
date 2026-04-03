@@ -22,6 +22,9 @@ struct Cli {
     #[arg(long)]
     pretty: bool,
 
+    #[arg(long, value_enum, default_value_t = fireql::Format::Json)]
+    format: fireql::Format,
+
     #[arg(long, default_value_t = 1)]
     batch_parallelism: usize,
 }
@@ -68,12 +71,65 @@ async fn run() -> Result<(), FireqlError> {
     let fireql = Fireql::new(config).await?;
     let output = fireql.execute(&sql).await?;
 
-    let json = if cli.pretty {
-        serde_json::to_string_pretty(&output)?
-    } else {
-        serde_json::to_string(&output)?
-    };
-
-    println!("{json}");
+    let formatted = cli.format.format(&output, cli.pretty)?;
+    println!("{formatted}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use fireql::Format;
+
+    #[test]
+    fn cli_default_format_is_json() {
+        let cli = Cli::try_parse_from(["fireql", "--project-id", "p", "--sql", "SELECT * FROM c"])
+            .unwrap();
+        assert_eq!(cli.format, Format::Json);
+    }
+
+    #[test]
+    fn cli_format_csv() {
+        let cli = Cli::try_parse_from([
+            "fireql",
+            "--project-id",
+            "p",
+            "--format",
+            "csv",
+            "--sql",
+            "SELECT * FROM c",
+        ])
+        .unwrap();
+        assert_eq!(cli.format, Format::Csv);
+    }
+
+    #[test]
+    fn cli_format_table() {
+        let cli = Cli::try_parse_from([
+            "fireql",
+            "--project-id",
+            "p",
+            "--format",
+            "table",
+            "--sql",
+            "SELECT * FROM c",
+        ])
+        .unwrap();
+        assert_eq!(cli.format, Format::Table);
+    }
+
+    #[test]
+    fn cli_invalid_format_rejected() {
+        let result = Cli::try_parse_from([
+            "fireql",
+            "--project-id",
+            "p",
+            "--format",
+            "xml",
+            "--sql",
+            "q",
+        ]);
+        assert!(result.is_err());
+    }
 }

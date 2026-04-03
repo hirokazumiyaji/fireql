@@ -154,10 +154,8 @@ async fn emulator_collection_group_select() -> Result<(), Box<dyn std::error::Er
         )
         .await?;
 
-    let select_sql = format!(
-        "SELECT * FROM collection_group('posts') WHERE title = '{}' LIMIT 5",
-        post_title
-    );
+    let select_sql =
+        format!("SELECT * FROM collection_group('posts') WHERE title = '{post_title}' LIMIT 5");
     let output = fireql.execute(&select_sql).await?;
     match output {
         FireqlOutput::Rows(rows) => {
