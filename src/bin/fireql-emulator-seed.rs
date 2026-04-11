@@ -1,8 +1,10 @@
+use async_trait::async_trait;
 use clap::Parser;
 use firestore::{
     FirestoreCreateSupport, FirestoreDb, FirestoreDbOptions, FirestoreGetByIdSupport,
     FirestoreUpdateSupport,
 };
+use gcloud_sdk::{BoxSource, Source, Token, TokenSourceType};
 use serde::Deserialize;
 use serde_json::Value;
 use std::env;
@@ -48,6 +50,19 @@ struct CollectionTarget {
     collection_id: String,
 }
 
+struct EmulatorTokenSource;
+
+#[async_trait]
+impl Source for EmulatorTokenSource {
+    async fn token(&self) -> gcloud_sdk::error::Result<Token> {
+        Ok(Token::new(
+            "Bearer".to_string(),
+            "emulator".into(),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        ))
+    }
+}
+
 #[tokio::main]
 async fn main() {
     if let Err(err) = run().await {
@@ -75,7 +90,13 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if let Some(database_id) = cli.database_id {
         options = options.with_database_id(database_id);
     }
-    let db = FirestoreDb::with_options(options).await?;
+    let token_source: BoxSource = Box::new(EmulatorTokenSource);
+    let db = FirestoreDb::with_options_token_source(
+        options,
+        gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
+        TokenSourceType::ExternalSource(token_source),
+    )
+    .await?;
 
     let mut total_documents = 0;
     for collection in &fixture.collections {
