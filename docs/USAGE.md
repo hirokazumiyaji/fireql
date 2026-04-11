@@ -232,3 +232,19 @@ export FIRESTORE_EMULATOR_HOST=localhost:8080
 export FIRESTORE_PROJECT_ID=demo-fireql
 cargo test
 ```
+
+固定の e2e データを投入する場合は `fixtures/emulator-e2e.json` を `fireql-emulator-seed` で流し込みます。
+
+```bash
+export FIRESTORE_EMULATOR_HOST=localhost:8080
+export FIRESTORE_PROJECT_ID=demo-fireql
+cargo run --bin fireql-emulator-seed
+```
+
+投入後にそのまま使えるクエリ:
+
+```sql
+SELECT * FROM e2e_users WHERE active = true ORDER BY score DESC LIMIT 10;
+SELECT * FROM e2e_users u LEFT JOIN e2e_orders o ON u.__name__ = o.user_id;
+SELECT * FROM collection_group('posts') WHERE category = 'release' AND published = true;
+```
