@@ -119,7 +119,7 @@ fn parse_collection_target(
     }
 
     let segments: Vec<&str> = path.split('/').collect();
-    if segments.len() % 2 == 0 {
+    if segments.len().is_multiple_of(2) {
         return Err(format!("collection path must end with a collection id: {path}").into());
     }
 
