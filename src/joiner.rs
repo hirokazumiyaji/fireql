@@ -12,13 +12,15 @@ pub enum JoinKey {
 }
 
 impl JoinKey {
-    pub fn from_fireql_value(value: &FireqlValue) -> Self {
+    pub fn from_fireql_value(value: &FireqlValue) -> std::result::Result<Self, String> {
         match value {
-            FireqlValue::String(s) => JoinKey::String(s.clone()),
-            FireqlValue::Integer(i) => JoinKey::Integer(*i),
-            FireqlValue::Boolean(b) => JoinKey::Boolean(*b),
-            FireqlValue::Null => JoinKey::Null,
-            _ => JoinKey::Null,
+            FireqlValue::String(s) => Ok(JoinKey::String(s.clone())),
+            FireqlValue::Integer(i) => Ok(JoinKey::Integer(*i)),
+            FireqlValue::Boolean(b) => Ok(JoinKey::Boolean(*b)),
+            FireqlValue::Null => Ok(JoinKey::Null),
+            other => Err(format!(
+                "unsupported Firestore value type used as join key: {other:?}"
+            )),
         }
     }
 
@@ -32,22 +34,22 @@ impl JoinKey {
     }
 }
 
-fn doc_key(doc: &DocOutput, field: &str) -> JoinKey {
+fn doc_key(doc: &DocOutput, field: &str) -> Result<JoinKey, String> {
     if field == "__name__" {
-        JoinKey::String(doc.id.clone())
+        Ok(JoinKey::String(doc.id.clone()))
     } else {
         match doc.data.get(field) {
             Some(v) => JoinKey::from_fireql_value(v),
-            None => JoinKey::Null,
+            None => Ok(JoinKey::Null),
         }
     }
 }
 
-pub fn extract_join_keys(docs: &[DocOutput], field: &str) -> Vec<JoinKey> {
+pub fn extract_join_keys(docs: &[DocOutput], field: &str) -> Result<Vec<JoinKey>, String> {
     let mut seen = HashSet::new();
     let mut keys = Vec::new();
     for doc in docs {
-        let key = doc_key(doc, field);
+        let key = doc_key(doc, field)?;
         if key == JoinKey::Null {
             continue;
         }
@@ -55,7 +57,7 @@ pub fn extract_join_keys(docs: &[DocOutput], field: &str) -> Vec<JoinKey> {
             keys.push(key);
         }
     }
-    keys
+    Ok(keys)
 }
 
 pub fn chunk_keys(keys: &[JoinKey], chunk_size: usize) -> Vec<&[JoinKey]> {
@@ -84,7 +86,7 @@ pub fn hash_join(
     left_docs: &[DocOutput],
     right_docs: &[DocOutput],
     params: &JoinParams<'_>,
-) -> Vec<DocOutput> {
+) -> Result<Vec<DocOutput>, String> {
     let JoinParams {
         left_field,
         right_field,
@@ -95,7 +97,7 @@ pub fn hash_join(
     } = params;
     let mut right_map: HashMap<JoinKey, Vec<&DocOutput>> = HashMap::new();
     for doc in right_docs {
-        let key = doc_key(doc, right_field);
+        let key = doc_key(doc, right_field)?;
         if key == JoinKey::Null {
             continue;
         }
@@ -118,7 +120,7 @@ pub fn hash_join(
 
     let mut result = Vec::new();
     for left_doc in left_docs {
-        let left_key = doc_key(left_doc, left_field);
+        let left_key = doc_key(left_doc, left_field)?;
 
         if left_key == JoinKey::Null {
             if *join_type == JoinType::Left {
@@ -147,7 +149,7 @@ pub fn hash_join(
             None => {}
         }
     }
-    result
+    Ok(result)
 }
 
 #[cfg(test)]
@@ -187,7 +189,7 @@ mod tests {
             make_doc("u1", vec![("name", FireqlValue::String("Alice".into()))]),
             make_doc("u2", vec![("name", FireqlValue::String("Bob".into()))]),
         ];
-        let keys = extract_join_keys(&docs, "__name__");
+        let keys = extract_join_keys(&docs, "__name__").unwrap();
         assert_eq!(keys.len(), 2);
         assert!(keys.contains(&JoinKey::String("u1".to_string())));
         assert!(keys.contains(&JoinKey::String("u2".to_string())));
@@ -200,7 +202,7 @@ mod tests {
             make_doc("u2", vec![("dept", FireqlValue::String("eng".into()))]),
             make_doc("u3", vec![("dept", FireqlValue::String("sales".into()))]),
         ];
-        let keys = extract_join_keys(&docs, "dept");
+        let keys = extract_join_keys(&docs, "dept").unwrap();
         assert_eq!(keys.len(), 2);
     }
 
@@ -261,7 +263,8 @@ mod tests {
                 "departments",
                 true,
             ),
-        );
+        )
+        .unwrap();
         assert_eq!(result.len(), 2);
         assert!(result[0].data.contains_key("users.name"));
         assert!(result[0].data.contains_key("departments.dept_name"));
@@ -290,7 +293,8 @@ mod tests {
                 "departments",
                 true,
             ),
-        );
+        )
+        .unwrap();
         assert_eq!(result.len(), 2);
         assert!(result[0].data.contains_key("departments.dept_name"));
         assert!(!result[1].data.contains_key("departments.dept_name"));
@@ -319,7 +323,8 @@ mod tests {
                 "orders",
                 true,
             ),
-        );
+        )
+        .unwrap();
         assert_eq!(result.len(), 2);
         assert_eq!(
             result[0].data.get("orders.amount"),
@@ -352,7 +357,8 @@ mod tests {
                 "reviews",
                 true,
             ),
-        );
+        )
+        .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(
             result[0].data.get("reviews.score"),
@@ -366,7 +372,7 @@ mod tests {
             make_doc("u1", vec![("name", FireqlValue::String("Alice".into()))]),
             make_doc("u2", vec![("dept", FireqlValue::String("eng".into()))]),
         ];
-        let keys = extract_join_keys(&docs, "dept");
+        let keys = extract_join_keys(&docs, "dept").unwrap();
         assert_eq!(keys.len(), 1);
         assert!(keys.contains(&JoinKey::String("eng".to_string())));
     }
@@ -374,7 +380,7 @@ mod tests {
     #[test]
     fn extract_join_keys_empty_docs() {
         let docs: Vec<DocOutput> = vec![];
-        let keys = extract_join_keys(&docs, "field");
+        let keys = extract_join_keys(&docs, "field").unwrap();
         assert!(keys.is_empty());
     }
 
@@ -392,7 +398,8 @@ mod tests {
             &left,
             &right,
             &jp("dept_id", "__name__", JoinType::Inner, "u", "d", true),
-        );
+        )
+        .unwrap();
         assert!(result.is_empty());
     }
 
@@ -407,7 +414,8 @@ mod tests {
             &left,
             &right,
             &jp("dept_id", "__name__", JoinType::Left, "u", "d", true),
-        );
+        )
+        .unwrap();
         assert_eq!(result.len(), 2);
         assert!(!result[0].data.contains_key("d.name"));
     }
@@ -450,7 +458,8 @@ mod tests {
             &left,
             &right,
             &jp("dept_id", "id", JoinType::Inner, "l", "r", true),
-        );
+        )
+        .unwrap();
         assert!(
             result.is_empty(),
             "NULL should not match NULL in INNER JOIN"
@@ -471,7 +480,8 @@ mod tests {
             &left,
             &right,
             &jp("dept_id", "__name__", JoinType::Left, "l", "r", true),
-        );
+        )
+        .unwrap();
         assert_eq!(result.len(), 2);
         assert!(result[0].data.contains_key("r.name"));
         assert!(!result[1].data.contains_key("r.name"));
@@ -483,18 +493,18 @@ mod tests {
             make_doc("u1", vec![("dept", FireqlValue::String("eng".into()))]),
             make_doc("u2", vec![]),
         ];
-        let keys = extract_join_keys(&docs, "dept");
+        let keys = extract_join_keys(&docs, "dept").unwrap();
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0], JoinKey::String("eng".to_string()));
     }
 
     #[test]
-    fn join_key_from_unsupported_type_returns_null() {
+    fn join_key_from_unsupported_type_returns_error() {
         let key = JoinKey::from_fireql_value(&FireqlValue::Double(1.23));
-        assert_eq!(key, JoinKey::Null);
+        assert!(key.is_err());
 
         let key = JoinKey::from_fireql_value(&FireqlValue::Array(vec![]));
-        assert_eq!(key, JoinKey::Null);
+        assert!(key.is_err());
     }
 
     #[test]
@@ -532,7 +542,8 @@ mod tests {
                 "products",
                 false,
             ),
-        );
+        )
+        .unwrap();
 
         assert_eq!(result.len(), 1);
         assert!(
@@ -587,7 +598,8 @@ mod tests {
                 "orders",
                 true,
             ),
-        );
+        )
+        .unwrap();
         assert_eq!(result.len(), 2);
     }
 }

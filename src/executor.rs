@@ -113,14 +113,71 @@ async fn execute_select(
     }
 }
 
+fn strip_alias_from_filter(filter: &FilterExpr, alias: &str) -> FilterExpr {
+    let strip_field = |field: &str| -> String {
+        let prefix = format!("{alias}.");
+        if field.starts_with(&prefix) {
+            field[prefix.len()..].to_string()
+        } else {
+            field.to_string()
+        }
+    };
+
+    match filter {
+        FilterExpr::Compare { field, op, value } => FilterExpr::Compare {
+            field: strip_field(field),
+            op: *op,
+            value: value.clone(),
+        },
+        FilterExpr::ArrayContains { field, value } => FilterExpr::ArrayContains {
+            field: strip_field(field),
+            value: value.clone(),
+        },
+        FilterExpr::ArrayContainsAny { field, values } => FilterExpr::ArrayContainsAny {
+            field: strip_field(field),
+            values: values.clone(),
+        },
+        FilterExpr::InList {
+            field,
+            values,
+            negated,
+        } => FilterExpr::InList {
+            field: strip_field(field),
+            values: values.clone(),
+            negated: *negated,
+        },
+        FilterExpr::Unary { field, op } => FilterExpr::Unary {
+            field: strip_field(field),
+            op: *op,
+        },
+        FilterExpr::And(exprs) => FilterExpr::And(
+            exprs
+                .iter()
+                .map(|e| strip_alias_from_filter(e, alias))
+                .collect(),
+        ),
+        FilterExpr::Or(exprs) => FilterExpr::Or(
+            exprs
+                .iter()
+                .map(|e| strip_alias_from_filter(e, alias))
+                .collect(),
+        ),
+    }
+}
+
 async fn execute_join_select(
     db: &FirestoreDb,
     stmt: &crate::sql::SelectStatement,
     joins: &[JoinSpec],
 ) -> Result<FireqlOutput> {
+    let left_alias = stmt.alias.as_deref().unwrap_or(&stmt.collection.name);
+    let stripped_filter = stmt
+        .filter
+        .as_ref()
+        .map(|f| strip_alias_from_filter(f, left_alias));
     let left_params = build_query_params(
         &stmt.collection,
-        stmt.filter.as_ref(),
+        stripped_filter.as_ref(),
         &stmt.order_by,
         stmt.limit,
         None,
@@ -141,7 +198,8 @@ async fn execute_join_select(
             join.left_field.clone()
         };
 
-        let keys = extract_join_keys(&current_result, &effective_left_field);
+        let keys = extract_join_keys(&current_result, &effective_left_field)
+            .map_err(FireqlError::Unsupported)?;
         if keys.is_empty() && join.join_type == crate::sql::JoinType::Inner {
             return Ok(FireqlOutput::Rows(vec![]));
         }
@@ -150,8 +208,20 @@ async fn execute_join_select(
         let mut right_docs = Vec::new();
 
         for chunk in chunks {
-            let in_values: Vec<serde_json::Value> =
-                chunk.iter().map(|k| k.to_json_value()).collect();
+            let in_values: Vec<serde_json::Value> = if join.right_field == "__name__" {
+                let doc_path = format!("{}/{}", db.get_documents_path(), &join.collection.name);
+                chunk
+                    .iter()
+                    .map(|k| match k {
+                        crate::joiner::JoinKey::String(s) => {
+                            serde_json::Value::String(format!("{doc_path}/{s}"))
+                        }
+                        _ => k.to_json_value(),
+                    })
+                    .collect()
+            } else {
+                chunk.iter().map(|k| k.to_json_value()).collect()
+            };
 
             let in_filter = FilterExpr::InList {
                 field: join.right_field.clone(),
@@ -185,15 +255,35 @@ async fn execute_join_select(
                 right_prefix,
                 prefix_left: !is_joined,
             },
-        );
+        )
+        .map_err(FireqlError::Unsupported)?;
 
         is_joined = true;
     }
 
     if let SelectProjection::Fields(Projection::Fields(ref fields)) = stmt.projection {
-        let field_set: HashSet<&str> = fields.iter().map(String::as_str).collect();
+        let available_keys: HashSet<String> = current_result
+            .iter()
+            .flat_map(|doc| doc.data.keys().cloned())
+            .collect();
+
+        let mut retained_keys: HashSet<String> = HashSet::new();
+        for field in fields {
+            if available_keys.contains(field) {
+                retained_keys.insert(field.clone());
+            }
+            if !field.contains('.') {
+                let suffix = format!(".{field}");
+                for key in &available_keys {
+                    if key.ends_with(&suffix) {
+                        retained_keys.insert(key.clone());
+                    }
+                }
+            }
+        }
+
         for doc in &mut current_result {
-            doc.data.retain(|k, _| field_set.contains(k.as_str()));
+            doc.data.retain(|k, _| retained_keys.contains(k));
         }
     }
 

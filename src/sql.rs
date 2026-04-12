@@ -407,8 +407,8 @@ fn parse_table_with_joins_for_select(
     table: &TableWithJoins,
 ) -> Result<(CollectionSpec, Option<String>, Option<Vec<JoinSpec>>)> {
     if table.joins.is_empty() {
-        let collection = parse_table_factor(&table.relation)?;
-        return Ok((collection, None, None));
+        let (collection, alias) = parse_table_factor_with_alias(&table.relation)?;
+        return Ok((collection, alias, None));
     }
 
     let (collection, alias) = parse_table_factor_with_alias(&table.relation)?;
@@ -427,8 +427,25 @@ fn parse_table_with_joins_for_select(
         };
 
         let (right_collection, right_alias) = parse_table_factor_with_alias(&join.relation)?;
-        let (left_alias_on, left_field, right_alias_on, right_field) =
+        let (first_qualifier, first_field, second_qualifier, second_field) =
             parse_join_on_expr(join_type.1)?;
+
+        let left_name = alias.as_deref().unwrap_or(&collection.name);
+        let right_name = right_alias.as_deref().unwrap_or(&right_collection.name);
+
+        let (left_alias_on, left_field, right_alias_on, right_field) =
+            match (&first_qualifier, &second_qualifier) {
+                (Some(fq), Some(sq)) if fq == right_name && sq == left_name => {
+                    (second_qualifier, second_field, first_qualifier, first_field)
+                }
+                (Some(fq), None) if fq == right_name => {
+                    (second_qualifier, second_field, first_qualifier, first_field)
+                }
+                (None, Some(sq)) if sq == left_name => {
+                    (second_qualifier, second_field, first_qualifier, first_field)
+                }
+                _ => (first_qualifier, first_field, second_qualifier, second_field),
+            };
 
         join_specs.push(JoinSpec {
             join_type: join_type.0,
@@ -445,7 +462,27 @@ fn parse_table_with_joins_for_select(
 
 fn parse_table_factor_with_alias(factor: &TableFactor) -> Result<(CollectionSpec, Option<String>)> {
     match factor {
-        TableFactor::Table { name, alias, .. } => {
+        TableFactor::Table {
+            name, alias, args, ..
+        } => {
+            if let Some(tfa) = args {
+                let func_name = object_name_to_string(name);
+                if func_name.eq_ignore_ascii_case("collection_group") {
+                    let collection_name = parse_collection_group_args(&tfa.args)?;
+                    let alias_str = alias.as_ref().map(|a| a.name.value.clone());
+                    return Ok((
+                        CollectionSpec {
+                            name: collection_name,
+                            is_group: true,
+                        },
+                        alias_str,
+                    ));
+                }
+                return Err(FireqlError::Unsupported(format!(
+                    "Table-valued functions are not supported: {func_name}"
+                )));
+            }
+
             let collection = parse_object_name(name)?;
             let alias_str = alias.as_ref().map(|a| a.name.value.clone());
             Ok((collection, alias_str))
@@ -481,7 +518,7 @@ fn parse_compound_ident_expr(expr: &Expr) -> Result<(Option<String>, String)> {
         }
         Expr::Identifier(ident) => Ok((None, ident.value.clone())),
         _ => Err(FireqlError::Unsupported(
-            "JOIN ON clause requires table.field expressions".to_string(),
+            "JOIN ON clause requires field references in the form table.field or field".to_string(),
         )),
     }
 }
