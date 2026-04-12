@@ -57,7 +57,7 @@ impl Source for EmulatorTokenSource {
     async fn token(&self) -> gcloud_sdk::error::Result<Token> {
         Ok(Token::new(
             "Bearer".to_string(),
-            "emulator".into(),
+            "owner".into(),
             chrono::Utc::now() + chrono::Duration::hours(1),
         ))
     }
