@@ -232,3 +232,19 @@ export FIRESTORE_EMULATOR_HOST=localhost:8080
 export FIRESTORE_PROJECT_ID=demo-fireql
 cargo test
 ```
+
+To load fixed e2e data, seed `fixtures/emulator-e2e.json` with `fireql-emulator-seed`.
+
+```bash
+export FIRESTORE_EMULATOR_HOST=localhost:8080
+export FIRESTORE_PROJECT_ID=demo-fireql
+cargo run --bin fireql-emulator-seed
+```
+
+Queries available immediately after seeding:
+
+```sql
+SELECT * FROM e2e_users WHERE active = true ORDER BY score DESC LIMIT 10;
+SELECT * FROM e2e_users u LEFT JOIN e2e_orders o ON u.__name__ = o.user_id;
+SELECT * FROM collection_group('posts') WHERE category = 'release' AND published = true;
+```

@@ -1,6 +1,7 @@
 mod error;
 mod executor;
 pub mod format;
+pub(crate) mod joiner;
 mod output;
 mod planner;
 mod sql;

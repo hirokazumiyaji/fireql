@@ -1,10 +1,12 @@
 use crate::error::{FireqlError, Result};
+use crate::joiner::{chunk_keys, extract_join_keys, hash_join, JoinParams};
 use crate::output::{DocOutput, FireqlOutput};
 use crate::planner::{
     build_aggregated_query_params, build_query_params, json_to_firestore_value_with_context,
 };
 use crate::sql::{
-    CollectionSpec, FilterExpr, OrderBy, SelectProjection, StatementAst, FIREQL_CURRENT_TS_KEY,
+    CollectionSpec, FilterExpr, JoinSpec, OrderBy, Projection, SelectProjection, StatementAst,
+    FIREQL_CURRENT_TS_KEY,
 };
 use crate::value::FireqlValue;
 
@@ -16,8 +18,10 @@ use firestore::{
 use futures::stream::{self, StreamExt};
 use gcloud_sdk::google::firestore::v1::{document_transform, write, DocumentMask, Write};
 use serde_json::Value as JsonValue;
+use std::collections::HashSet;
 
 const BATCH_LIMIT: usize = 500;
+const FIRESTORE_IN_LIMIT: usize = 10;
 
 struct FireqlWrite(Write);
 
@@ -71,6 +75,10 @@ async fn execute_select(
     db: &FirestoreDb,
     stmt: crate::sql::SelectStatement,
 ) -> Result<FireqlOutput> {
+    if let Some(ref joins) = stmt.joins {
+        return execute_join_select(db, &stmt, joins).await;
+    }
+
     match &stmt.projection {
         SelectProjection::Fields(projection) => {
             let params = build_query_params(
@@ -83,12 +91,7 @@ async fn execute_select(
             )?;
 
             let docs = db.query_doc(params).await?;
-            let mut rows = Vec::with_capacity(docs.len());
-            for doc in docs {
-                rows.push(doc_to_output(&doc)?);
-            }
-
-            Ok(FireqlOutput::Rows(rows))
+            Ok(FireqlOutput::Rows(docs_to_output(&docs)?))
         }
         SelectProjection::Aggregations(aggregations) => {
             let params = build_aggregated_query_params(
@@ -108,6 +111,183 @@ async fn execute_select(
             Ok(FireqlOutput::Aggregation(data))
         }
     }
+}
+
+fn strip_alias_from_filter(filter: &FilterExpr, alias: &str) -> FilterExpr {
+    let strip_field = |field: &str| -> String {
+        let prefix = format!("{alias}.");
+        if field.starts_with(&prefix) {
+            field[prefix.len()..].to_string()
+        } else {
+            field.to_string()
+        }
+    };
+
+    match filter {
+        FilterExpr::Compare { field, op, value } => FilterExpr::Compare {
+            field: strip_field(field),
+            op: *op,
+            value: value.clone(),
+        },
+        FilterExpr::ArrayContains { field, value } => FilterExpr::ArrayContains {
+            field: strip_field(field),
+            value: value.clone(),
+        },
+        FilterExpr::ArrayContainsAny { field, values } => FilterExpr::ArrayContainsAny {
+            field: strip_field(field),
+            values: values.clone(),
+        },
+        FilterExpr::InList {
+            field,
+            values,
+            negated,
+        } => FilterExpr::InList {
+            field: strip_field(field),
+            values: values.clone(),
+            negated: *negated,
+        },
+        FilterExpr::Unary { field, op } => FilterExpr::Unary {
+            field: strip_field(field),
+            op: *op,
+        },
+        FilterExpr::And(exprs) => FilterExpr::And(
+            exprs
+                .iter()
+                .map(|e| strip_alias_from_filter(e, alias))
+                .collect(),
+        ),
+        FilterExpr::Or(exprs) => FilterExpr::Or(
+            exprs
+                .iter()
+                .map(|e| strip_alias_from_filter(e, alias))
+                .collect(),
+        ),
+    }
+}
+
+async fn execute_join_select(
+    db: &FirestoreDb,
+    stmt: &crate::sql::SelectStatement,
+    joins: &[JoinSpec],
+) -> Result<FireqlOutput> {
+    let left_alias = stmt.alias.as_deref().unwrap_or(&stmt.collection.name);
+    let stripped_filter = stmt
+        .filter
+        .as_ref()
+        .map(|f| strip_alias_from_filter(f, left_alias));
+    let left_params = build_query_params(
+        &stmt.collection,
+        stripped_filter.as_ref(),
+        &stmt.order_by,
+        stmt.limit,
+        None,
+        Some(db.get_documents_path().as_str()),
+    )?;
+    let left_docs_raw = db.query_doc(left_params).await?;
+    let left_docs = docs_to_output(&left_docs_raw)?;
+
+    let left_prefix = stmt.alias.as_deref().unwrap_or(&stmt.collection.name);
+    let mut current_result = left_docs;
+    let mut is_joined = false;
+
+    for join in joins {
+        let effective_left_field = if is_joined {
+            let alias = join.left_alias.as_deref().unwrap_or(left_prefix);
+            format!("{alias}.{}", join.left_field)
+        } else {
+            join.left_field.clone()
+        };
+
+        let keys = extract_join_keys(&current_result, &effective_left_field)
+            .map_err(FireqlError::Unsupported)?;
+        if keys.is_empty() && join.join_type == crate::sql::JoinType::Inner {
+            return Ok(FireqlOutput::Rows(vec![]));
+        }
+
+        let chunks = chunk_keys(&keys, FIRESTORE_IN_LIMIT);
+        let mut right_docs = Vec::new();
+
+        for chunk in chunks {
+            let in_values: Vec<serde_json::Value> = if join.right_field == "__name__" {
+                let doc_path = format!("{}/{}", db.get_documents_path(), &join.collection.name);
+                chunk
+                    .iter()
+                    .map(|k| match k {
+                        crate::joiner::JoinKey::String(s) => {
+                            serde_json::Value::String(format!("{doc_path}/{s}"))
+                        }
+                        _ => k.to_json_value(),
+                    })
+                    .collect()
+            } else {
+                chunk.iter().map(|k| k.to_json_value()).collect()
+            };
+
+            let in_filter = FilterExpr::InList {
+                field: join.right_field.clone(),
+                values: in_values,
+                negated: false,
+            };
+
+            let right_params = build_query_params(
+                &join.collection,
+                Some(&in_filter),
+                &[],
+                None,
+                None,
+                Some(db.get_documents_path().as_str()),
+            )?;
+
+            let chunk_docs = db.query_doc(right_params).await?;
+            right_docs.extend(docs_to_output(&chunk_docs)?);
+        }
+
+        let right_prefix = join.right_alias.as_deref().unwrap_or(&join.collection.name);
+
+        current_result = hash_join(
+            &current_result,
+            &right_docs,
+            &JoinParams {
+                left_field: &effective_left_field,
+                right_field: &join.right_field,
+                join_type: join.join_type,
+                left_prefix,
+                right_prefix,
+                prefix_left: !is_joined,
+            },
+        )
+        .map_err(FireqlError::Unsupported)?;
+
+        is_joined = true;
+    }
+
+    if let SelectProjection::Fields(Projection::Fields(ref fields)) = stmt.projection {
+        let available_keys: HashSet<String> = current_result
+            .iter()
+            .flat_map(|doc| doc.data.keys().cloned())
+            .collect();
+
+        let mut retained_keys: HashSet<String> = HashSet::new();
+        for field in fields {
+            if available_keys.contains(field) {
+                retained_keys.insert(field.clone());
+            }
+            if !field.contains('.') {
+                let suffix = format!(".{field}");
+                for key in &available_keys {
+                    if key.ends_with(&suffix) {
+                        retained_keys.insert(key.clone());
+                    }
+                }
+            }
+        }
+
+        for doc in &mut current_result {
+            doc.data.retain(|k, _| retained_keys.contains(k));
+        }
+    }
+
+    Ok(FireqlOutput::Rows(current_result))
 }
 
 #[derive(Clone)]
@@ -247,6 +427,10 @@ fn is_current_timestamp_value(value: &JsonValue) -> bool {
         JsonValue::Object(map) => map.contains_key(FIREQL_CURRENT_TS_KEY),
         _ => false,
     }
+}
+
+fn docs_to_output(docs: &[gcloud_sdk::google::firestore::v1::Document]) -> Result<Vec<DocOutput>> {
+    docs.iter().map(doc_to_output).collect()
 }
 
 fn doc_to_output(doc: &gcloud_sdk::google::firestore::v1::Document) -> Result<DocOutput> {

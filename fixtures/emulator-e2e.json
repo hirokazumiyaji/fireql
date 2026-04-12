@@ -1,0 +1,145 @@
+{
+  "collections": [
+    {
+      "path": "e2e_users",
+      "documents": [
+        {
+          "id": "alice",
+          "data": {
+            "name": "Alice",
+            "age": 31,
+            "active": true,
+            "tier": "pro",
+            "score": 120,
+            "region": "apac",
+            "tags": ["rust", "firestore"],
+            "profile": {
+              "team": "platform",
+              "role": "engineer"
+            }
+          }
+        },
+        {
+          "id": "bob",
+          "data": {
+            "name": "Bob",
+            "age": 24,
+            "active": false,
+            "tier": "free",
+            "score": 40,
+            "region": "us",
+            "tags": ["sql"],
+            "profile": {
+              "team": "growth",
+              "role": "analyst"
+            }
+          }
+        },
+        {
+          "id": "carol",
+          "data": {
+            "name": "Carol",
+            "age": 29,
+            "active": true,
+            "tier": "team",
+            "score": 90,
+            "region": "jp",
+            "tags": ["rust", "sql"],
+            "profile": {
+              "team": "product",
+              "role": "manager"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "path": "e2e_orders",
+      "documents": [
+        {
+          "id": "order-1",
+          "data": {
+            "user_id": "alice",
+            "amount": 120,
+            "status": "paid",
+            "item_count": 2
+          }
+        },
+        {
+          "id": "order-2",
+          "data": {
+            "user_id": "alice",
+            "amount": 80,
+            "status": "pending",
+            "item_count": 1
+          }
+        },
+        {
+          "id": "order-3",
+          "data": {
+            "user_id": "carol",
+            "amount": 200,
+            "status": "paid",
+            "item_count": 4
+          }
+        }
+      ]
+    },
+    {
+      "path": "e2e_accounts",
+      "documents": [
+        {
+          "id": "acme",
+          "data": {
+            "name": "Acme",
+            "plan": "team"
+          }
+        },
+        {
+          "id": "contoso",
+          "data": {
+            "name": "Contoso",
+            "plan": "free"
+          }
+        }
+      ]
+    },
+    {
+      "path": "e2e_accounts/acme/posts",
+      "documents": [
+        {
+          "id": "release-1",
+          "data": {
+            "title": "Launch Notes",
+            "category": "release",
+            "published": true,
+            "likes": 12
+          }
+        },
+        {
+          "id": "devlog-1",
+          "data": {
+            "title": "Sprint Notes",
+            "category": "engineering",
+            "published": false,
+            "likes": 2
+          }
+        }
+      ]
+    },
+    {
+      "path": "e2e_accounts/contoso/posts",
+      "documents": [
+        {
+          "id": "release-2",
+          "data": {
+            "title": "Feature Rollout",
+            "category": "release",
+            "published": true,
+            "likes": 7
+          }
+        }
+      ]
+    }
+  ]
+}
