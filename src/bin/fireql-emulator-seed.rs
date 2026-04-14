@@ -135,26 +135,9 @@ fn parse_collection_target(
     db: &FirestoreDb,
     path: &str,
 ) -> Result<CollectionTarget, Box<dyn Error>> {
-    if path.is_empty() || path.starts_with('/') || path.ends_with('/') || path.contains("//") {
-        return Err(format!("invalid collection path: {path}").into());
-    }
-
-    let segments: Vec<&str> = path.split('/').collect();
-    if segments.len().is_multiple_of(2) {
-        return Err(format!("collection path must end with a collection id: {path}").into());
-    }
-
-    let collection_id = segments.last().unwrap().to_string();
-    let parent = if segments.len() == 1 {
-        None
-    } else {
-        Some(format!(
-            "{}/{}",
-            db.get_documents_path(),
-            segments[..segments.len() - 1].join("/")
-        ))
-    };
-
+    let (collection_id, parent_path) =
+        fireql::parse_collection_relative_path(path).map_err(|e| format!("{e}"))?;
+    let parent = parent_path.map(|pp| format!("{}/{pp}", db.get_documents_path()));
     Ok(CollectionTarget {
         parent,
         collection_id,

@@ -22,18 +22,27 @@ pub fn build_query_params(
     order_by: &[OrderBy],
     limit: Option<u32>,
     projection: Option<&Projection>,
-    base_doc_path: Option<&str>,
+    documents_path: Option<&str>,
 ) -> Result<FirestoreQueryParams> {
     validate_query_constraints(filter, order_by)?;
 
-    let mut params = FirestoreQueryParams::new(collection_id(collection));
+    let mut params = FirestoreQueryParams::new(firestore_query_collection(collection));
 
     if collection.is_group {
         params.all_descendants = Some(true);
     }
 
+    if let Some(pp) = &collection.parent_path {
+        let base = documents_path.ok_or_else(|| {
+            FireqlError::InvalidQuery(
+                "collection() with a subcollection path requires database context".to_string(),
+            )
+        })?;
+        params.parent = Some(format!("{base}/{pp}"));
+    }
+
     if let Some(filter_expr) = filter {
-        params.filter = Some(build_filter(filter_expr, base_doc_path)?);
+        params.filter = Some(build_filter(filter_expr, documents_path)?);
     }
 
     if !order_by.is_empty() {
@@ -67,7 +76,7 @@ pub fn build_aggregated_query_params(
     order_by: &[OrderBy],
     limit: Option<u32>,
     aggregations: &[AggregationExpr],
-    base_doc_path: Option<&str>,
+    documents_path: Option<&str>,
 ) -> Result<FirestoreAggregatedQueryParams> {
     if !order_by.is_empty() {
         return Err(FireqlError::InvalidQuery(
@@ -80,7 +89,7 @@ pub fn build_aggregated_query_params(
         ));
     }
     let query_params =
-        build_query_params(collection, filter, order_by, limit, None, base_doc_path)?;
+        build_query_params(collection, filter, order_by, limit, None, documents_path)?;
     let mut aggs = Vec::with_capacity(aggregations.len());
     for agg in aggregations {
         aggs.push(build_aggregation(agg)?);
@@ -275,22 +284,22 @@ fn collect_filter_stats(filter: &FilterExpr, stats: &mut FilterStats) {
 
 pub fn build_filter(
     filter: &FilterExpr,
-    base_doc_path: Option<&str>,
+    documents_path: Option<&str>,
 ) -> Result<FirestoreQueryFilter> {
     match filter {
         FilterExpr::Compare { field, op, value } => Ok(FirestoreQueryFilter::Compare(Some(
-            compare_op_to_firestore(field, *op, value, base_doc_path)?,
+            compare_op_to_firestore(field, *op, value, documents_path)?,
         ))),
         FilterExpr::ArrayContains { field, value } => Ok(FirestoreQueryFilter::Compare(Some(
             FirestoreQueryFilterCompare::ArrayContains(
                 field.clone(),
-                json_to_firestore_value_with_context(value, base_doc_path)?,
+                json_to_firestore_value_with_context(value, documents_path)?,
             ),
         ))),
         FilterExpr::ArrayContainsAny { field, values } => Ok(FirestoreQueryFilter::Compare(Some(
             FirestoreQueryFilterCompare::ArrayContainsAny(
                 field.clone(),
-                json_array_to_firestore_value_with_context(values, base_doc_path)?,
+                json_array_to_firestore_value_with_context(values, documents_path)?,
             ),
         ))),
         FilterExpr::InList {
@@ -298,7 +307,7 @@ pub fn build_filter(
             values,
             negated,
         } => {
-            let value = json_array_to_firestore_value_with_context(values, base_doc_path)?;
+            let value = json_array_to_firestore_value_with_context(values, documents_path)?;
             let filter = if *negated {
                 FirestoreQueryFilterCompare::NotIn(field.clone(), value)
             } else {
@@ -315,7 +324,7 @@ pub fn build_filter(
                 operator: FirestoreQueryFilterCompositeOperator::And,
                 for_all_filters: filters
                     .iter()
-                    .map(|f| build_filter(f, base_doc_path))
+                    .map(|f| build_filter(f, documents_path))
                     .collect::<Result<Vec<_>>>()?,
             },
         )),
@@ -324,7 +333,7 @@ pub fn build_filter(
                 operator: FirestoreQueryFilterCompositeOperator::Or,
                 for_all_filters: filters
                     .iter()
-                    .map(|f| build_filter(f, base_doc_path))
+                    .map(|f| build_filter(f, documents_path))
                     .collect::<Result<Vec<_>>>()?,
             },
         )),
@@ -335,9 +344,9 @@ fn compare_op_to_firestore(
     field: &str,
     op: CompareOp,
     value: &JsonValue,
-    base_doc_path: Option<&str>,
+    documents_path: Option<&str>,
 ) -> Result<FirestoreQueryFilterCompare> {
-    let firestore_value = json_to_firestore_value_with_context(value, base_doc_path)?;
+    let firestore_value = json_to_firestore_value_with_context(value, documents_path)?;
     Ok(match op {
         CompareOp::Eq => FirestoreQueryFilterCompare::Equal(field.to_string(), firestore_value),
         CompareOp::NotEq => {
@@ -358,11 +367,11 @@ fn compare_op_to_firestore(
 
 pub(crate) fn json_to_firestore_value_with_context(
     value: &JsonValue,
-    base_doc_path: Option<&str>,
+    documents_path: Option<&str>,
 ) -> Result<FirestoreValue> {
     if let JsonValue::Object(map) = value {
         if let Some(JsonValue::String(path)) = map.get(FIREQL_REF_KEY) {
-            let full = expand_reference_path(path, base_doc_path)?;
+            let full = expand_reference_path(path, documents_path)?;
             let fv: FirestoreValue = FirestoreReference(full).into();
             return Ok(fv);
         }
@@ -383,11 +392,11 @@ pub(crate) fn json_to_firestore_value_with_context(
 
 pub(crate) fn json_array_to_firestore_value_with_context(
     values: &[JsonValue],
-    base_doc_path: Option<&str>,
+    documents_path: Option<&str>,
 ) -> Result<FirestoreValue> {
     let mut array_values = Vec::with_capacity(values.len());
     for value in values {
-        let fv = json_to_firestore_value_with_context(value, base_doc_path)?;
+        let fv = json_to_firestore_value_with_context(value, documents_path)?;
         array_values.push(fv.value);
     }
     Ok(FirestoreValue::from(
@@ -409,11 +418,11 @@ struct FirestoreReference(pub String);
 #[derive(Serialize)]
 struct FirestoreTimestamp(pub DateTime<Utc>);
 
-fn collection_id(collection: &CollectionSpec) -> FirestoreQueryCollection {
+fn firestore_query_collection(collection: &CollectionSpec) -> FirestoreQueryCollection {
     if collection.is_group {
-        FirestoreQueryCollection::Group(vec![collection.name.clone()])
+        FirestoreQueryCollection::Group(vec![collection.collection_id.clone()])
     } else {
-        FirestoreQueryCollection::Single(collection.name.clone())
+        FirestoreQueryCollection::Single(collection.collection_id.clone())
     }
 }
 
@@ -426,11 +435,11 @@ fn is_absolute_resource_name(path: &str) -> bool {
         && segments.next() == Some("documents")
 }
 
-fn expand_reference_path(path: &str, base_doc_path: Option<&str>) -> Result<String> {
+fn expand_reference_path(path: &str, documents_path: Option<&str>) -> Result<String> {
     if is_absolute_resource_name(path) {
         return Ok(path.to_string());
     }
-    let base = base_doc_path
+    let base = documents_path
         .ok_or_else(|| FireqlError::InvalidQuery("ref(path) requires absolute path".to_string()))?;
     Ok(format!("{base}/{path}"))
 }
@@ -444,9 +453,49 @@ mod tests {
 
     fn collection() -> CollectionSpec {
         CollectionSpec {
-            name: "users".to_string(),
+            collection_id: "users".to_string(),
+            parent_path: None,
             is_group: false,
         }
+    }
+
+    #[test]
+    fn subcollection_query_sets_parent() {
+        let col = CollectionSpec {
+            collection_id: "posts".to_string(),
+            parent_path: Some("users/u1".to_string()),
+            is_group: false,
+        };
+        let params = build_query_params(
+            &col,
+            None,
+            &[],
+            None,
+            None,
+            Some("projects/x/databases/(default)/documents"),
+        )
+        .unwrap();
+        assert_eq!(
+            params.parent.as_deref(),
+            Some("projects/x/databases/(default)/documents/users/u1")
+        );
+        assert_eq!(
+            params.collection_id,
+            FirestoreQueryCollection::Single("posts".to_string())
+        );
+        assert_eq!(params.all_descendants, None);
+    }
+
+    #[test]
+    fn collection_group_still_all_descendants() {
+        let col = CollectionSpec {
+            collection_id: "posts".to_string(),
+            parent_path: None,
+            is_group: true,
+        };
+        let params = build_query_params(&col, None, &[], None, None, None).unwrap();
+        assert_eq!(params.parent, None);
+        assert_eq!(params.all_descendants, Some(true));
     }
 
     #[test]

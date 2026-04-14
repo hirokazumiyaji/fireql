@@ -124,14 +124,16 @@ match output {
 
 - `SELECT * FROM <collection>`
 - `SELECT field1, field2 FROM <collection>`
+- `FROM collection('relative-path')` — path relative to `documents`, odd number of segments ending in a collection ID (e.g. `posts`, `users/user1/posts`). `collection('posts')` is equivalent to top-level `posts`.
 - `FROM collection_group('name')` supported
 - `WHERE` / `ORDER BY` / `LIMIT`
 
 ### UPDATE / DELETE
 
-- `UPDATE <collection> SET ... WHERE ...`
+- `UPDATE <collection> SET ... WHERE ...` (`collection('...')` supported)
 - `DELETE FROM <collection> WHERE ...`
 - `DELETE FROM collection_group('name') WHERE ...`
+- `DELETE FROM collection('...') WHERE ...`
 
 `WHERE` is required.
 

@@ -10,6 +10,7 @@ mod value;
 pub use error::{FireqlError, Result};
 pub use format::Format;
 pub use output::{DocOutput, FireqlOutput};
+pub use sql::parse_collection_relative_path;
 pub use value::FireqlValue;
 
 use firestore::{FirestoreDb, FirestoreDbOptions};

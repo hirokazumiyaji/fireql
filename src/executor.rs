@@ -170,7 +170,7 @@ async fn execute_join_select(
     stmt: &crate::sql::SelectStatement,
     joins: &[JoinSpec],
 ) -> Result<FireqlOutput> {
-    let left_alias = stmt.alias.as_deref().unwrap_or(&stmt.collection.name);
+    let left_alias = stmt.alias.as_deref().unwrap_or(&stmt.collection.collection_id);
     let stripped_filter = stmt
         .filter
         .as_ref()
@@ -186,13 +186,12 @@ async fn execute_join_select(
     let left_docs_raw = db.query_doc(left_params).await?;
     let left_docs = docs_to_output(&left_docs_raw)?;
 
-    let left_prefix = stmt.alias.as_deref().unwrap_or(&stmt.collection.name);
     let mut current_result = left_docs;
     let mut is_joined = false;
 
     for join in joins {
         let effective_left_field = if is_joined {
-            let alias = join.left_alias.as_deref().unwrap_or(left_prefix);
+            let alias = join.left_alias.as_deref().unwrap_or(left_alias);
             format!("{alias}.{}", join.left_field)
         } else {
             join.left_field.clone()
@@ -207,9 +206,22 @@ async fn execute_join_select(
         let chunks = chunk_keys(&keys, FIRESTORE_IN_LIMIT);
         let mut right_docs = Vec::new();
 
+        let doc_path = match &join.collection.parent_path {
+            Some(pp) => format!(
+                "{}/{}/{}",
+                db.get_documents_path(),
+                pp,
+                join.collection.collection_id
+            ),
+            None => format!(
+                "{}/{}",
+                db.get_documents_path(),
+                join.collection.collection_id
+            ),
+        };
+
         for chunk in chunks {
             let in_values: Vec<serde_json::Value> = if join.right_field == "__name__" {
-                let doc_path = format!("{}/{}", db.get_documents_path(), &join.collection.name);
                 chunk
                     .iter()
                     .map(|k| match k {
@@ -242,7 +254,10 @@ async fn execute_join_select(
             right_docs.extend(docs_to_output(&chunk_docs)?);
         }
 
-        let right_prefix = join.right_alias.as_deref().unwrap_or(&join.collection.name);
+        let right_prefix = join
+            .right_alias
+            .as_deref()
+            .unwrap_or(&join.collection.collection_id);
 
         current_result = hash_join(
             &current_result,
@@ -251,7 +266,7 @@ async fn execute_join_select(
                 left_field: &effective_left_field,
                 right_field: &join.right_field,
                 join_type: join.join_type,
-                left_prefix,
+                left_prefix: left_alias,
                 right_prefix,
                 prefix_left: !is_joined,
             },
