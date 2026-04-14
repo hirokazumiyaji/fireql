@@ -6,7 +6,7 @@ Firestore を SQL で操作する Rust 製 CLI / ライブラリです。
 
 ## 対応 SQL
 
-- `SELECT ... FROM <collection>` / `FROM collection_group('name')`
+- `SELECT ... FROM <collection>` / `FROM collection('path')` / `FROM collection_group('name')`
 - `WHERE`（AND / OR / 比較 / IN / IS NULL / array_contains / array_contains_any / ref / timestamp / CURRENT_TIMESTAMP）
 - 集約: `COUNT`, `SUM`, `AVG`
 - `ORDER BY` / `LIMIT`
@@ -18,6 +18,7 @@ Firestore を SQL で操作する Rust 製 CLI / ライブラリです。
 ```sql
 SELECT * FROM users WHERE age >= 18 ORDER BY age DESC LIMIT 10;
 SELECT name, profile.age FROM collection_group('profiles') WHERE active = true;
+SELECT * FROM collection('users/user1/posts') WHERE published = true;
 SELECT * FROM users WHERE array_contains(tags, 'rust');
 SELECT * FROM users WHERE array_contains_any(tags, ['rust','sql']);
 SELECT * FROM users WHERE owner = ref('users/user1');

@@ -124,14 +124,16 @@ match output {
 
 - `SELECT * FROM <collection>`
 - `SELECT field1, field2 FROM <collection>`
+- `FROM collection('相対パス')` — `documents` からの相対パスで、末尾がコレクション ID になる奇数セグメント（例: `posts`、`users/user1/posts`）。`collection('posts')` はトップレベル `posts` と同じ。
 - `FROM collection_group('name')` に対応
 - `WHERE` / `ORDER BY` / `LIMIT`
 
 ### UPDATE / DELETE
 
-- `UPDATE <collection> SET ... WHERE ...`
+- `UPDATE <collection> SET ... WHERE ...`（`collection('...')` も可）
 - `DELETE FROM <collection> WHERE ...`
 - `DELETE FROM collection_group('name') WHERE ...`
+- `DELETE FROM collection('...') WHERE ...`
 
 `WHERE` は必須です。
 

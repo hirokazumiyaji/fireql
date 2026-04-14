@@ -17,7 +17,8 @@ pub enum StatementAst {
 
 #[derive(Debug, Clone)]
 pub struct CollectionSpec {
-    pub name: String,
+    pub collection_id: String,
+    pub parent_path: Option<String>,
     pub is_group: bool,
 }
 
@@ -169,7 +170,7 @@ pub enum UnaryOp {
 }
 
 pub fn parse_sql(input: &str) -> Result<StatementAst> {
-    if let Some(stmt) = try_parse_delete_collection_group(input)? {
+    if let Some(stmt) = try_parse_delete_table_function(input)? {
         return Ok(stmt);
     }
 
@@ -232,7 +233,7 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
     }
 }
 
-fn try_parse_delete_collection_group(input: &str) -> Result<Option<StatementAst>> {
+fn try_parse_delete_table_function(input: &str) -> Result<Option<StatementAst>> {
     let trimmed = input.trim_start();
 
     let mut parts = trimmed.splitn(2, char::is_whitespace);
@@ -246,10 +247,10 @@ fn try_parse_delete_collection_group(input: &str) -> Result<Option<StatementAst>
         return Ok(None);
     }
     let after_from = words.next().unwrap_or("").trim_start();
-    if !after_from
-        .split_once('(')
-        .is_some_and(|(name, _)| name.trim().eq_ignore_ascii_case("collection_group"))
-    {
+    if !after_from.split_once('(').is_some_and(|(name, _)| {
+        let n = name.trim();
+        n.eq_ignore_ascii_case("collection_group") || n.eq_ignore_ascii_case("collection")
+    }) {
         return Ok(None);
     }
 
@@ -430,8 +431,10 @@ fn parse_table_with_joins_for_select(
         let (first_qualifier, first_field, second_qualifier, second_field) =
             parse_join_on_expr(join_type.1)?;
 
-        let left_name = alias.as_deref().unwrap_or(&collection.name);
-        let right_name = right_alias.as_deref().unwrap_or(&right_collection.name);
+        let left_name = alias.as_deref().unwrap_or(&collection.collection_id);
+        let right_name = right_alias
+            .as_deref()
+            .unwrap_or(&right_collection.collection_id);
 
         let (left_alias_on, left_field, right_alias_on, right_field) =
             match (&first_qualifier, &second_qualifier) {
@@ -468,15 +471,14 @@ fn parse_table_factor_with_alias(factor: &TableFactor) -> Result<(CollectionSpec
             if let Some(tfa) = args {
                 let func_name = object_name_to_string(name);
                 if func_name.eq_ignore_ascii_case("collection_group") {
-                    let collection_name = parse_collection_group_args(&tfa.args)?;
+                    let spec = parse_collection_group_args(&tfa.args)?;
                     let alias_str = alias.as_ref().map(|a| a.name.value.clone());
-                    return Ok((
-                        CollectionSpec {
-                            name: collection_name,
-                            is_group: true,
-                        },
-                        alias_str,
-                    ));
+                    return Ok((spec, alias_str));
+                }
+                if func_name.eq_ignore_ascii_case("collection") {
+                    let spec = parse_collection_args(&tfa.args)?;
+                    let alias_str = alias.as_ref().map(|a| a.name.value.clone());
+                    return Ok((spec, alias_str));
                 }
                 return Err(FireqlError::Unsupported(format!(
                     "Table-valued functions are not supported: {func_name}"
@@ -524,50 +526,78 @@ fn parse_compound_ident_expr(expr: &Expr) -> Result<(Option<String>, String)> {
 }
 
 fn parse_table_factor(factor: &TableFactor) -> Result<CollectionSpec> {
-    match factor {
-        TableFactor::Table { name, args, .. } => {
-            if let Some(tfa) = args {
-                let func_name = object_name_to_string(name);
-                if func_name.eq_ignore_ascii_case("collection_group") {
-                    let collection = parse_collection_group_args(&tfa.args)?;
-                    return Ok(CollectionSpec {
-                        name: collection,
-                        is_group: true,
-                    });
-                }
-                return Err(FireqlError::Unsupported(format!(
-                    "Table-valued functions are not supported: {func_name}"
-                )));
-            }
-
-            let collection = parse_object_name(name)?;
-            Ok(collection)
-        }
-        other => Err(FireqlError::Unsupported(format!(
-            "Unsupported FROM source: {other:?}"
-        ))),
-    }
+    parse_table_factor_with_alias(factor).map(|(spec, _)| spec)
 }
 
-fn parse_collection_group_args(args: &[FunctionArg]) -> Result<String> {
+fn parse_collection_group_args(args: &[FunctionArg]) -> Result<CollectionSpec> {
     if args.len() != 1 {
         return Err(FireqlError::Unsupported(
             "collection_group() expects exactly one argument".to_string(),
         ));
     }
 
-    match &args[0] {
+    let collection_id = match &args[0] {
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => match expr {
-            Expr::Value(_) => expr_to_string_literal(expr, "collection_group()"),
-            Expr::Identifier(ident) => Ok(ident.value.clone()),
-            other => Err(FireqlError::Unsupported(format!(
-                "collection_group() expects a string literal or identifier, got: {other:?}"
-            ))),
+            Expr::Value(_) => expr_to_string_literal(expr, "collection_group()")?,
+            Expr::Identifier(ident) => ident.value.clone(),
+            other => {
+                return Err(FireqlError::Unsupported(format!(
+                    "collection_group() expects a string literal or identifier, got: {other:?}"
+                )))
+            }
         },
-        _ => Err(FireqlError::Unsupported(
-            "collection_group() expects a single unnamed argument".to_string(),
-        )),
+        _ => {
+            return Err(FireqlError::Unsupported(
+                "collection_group() expects a single unnamed argument".to_string(),
+            ))
+        }
+    };
+    Ok(CollectionSpec {
+        collection_id,
+        parent_path: None,
+        is_group: true,
+    })
+}
+
+const COLLECTION_PATH_ERR: &str =
+    "collection() expects a relative collection path ending in a collection id";
+
+pub fn parse_collection_relative_path(raw: &str) -> Result<(String, Option<String>)> {
+    let segments: Vec<&str> = raw.split('/').collect();
+    if segments.iter().any(|s| s.is_empty()) || segments.len().is_multiple_of(2) {
+        return Err(FireqlError::Unsupported(COLLECTION_PATH_ERR.to_string()));
     }
+    let collection_id = segments.last().unwrap().to_string();
+    let parent_path = if segments.len() == 1 {
+        None
+    } else {
+        Some(segments[..segments.len() - 1].join("/"))
+    };
+    Ok((collection_id, parent_path))
+}
+
+fn parse_collection_args(args: &[FunctionArg]) -> Result<CollectionSpec> {
+    if args.len() != 1 {
+        return Err(FireqlError::Unsupported(
+            "collection() expects exactly one argument".to_string(),
+        ));
+    }
+    let raw = match &args[0] {
+        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
+            expr_to_string_literal(expr, "collection()")?
+        }
+        _ => {
+            return Err(FireqlError::Unsupported(
+                "collection() expects a single unnamed argument".to_string(),
+            ))
+        }
+    };
+    let (collection_id, parent_path) = parse_collection_relative_path(&raw)?;
+    Ok(CollectionSpec {
+        collection_id,
+        parent_path,
+        is_group: false,
+    })
 }
 
 fn parse_object_name(name: &ObjectName) -> Result<CollectionSpec> {
@@ -585,7 +615,8 @@ fn parse_object_name(name: &ObjectName) -> Result<CollectionSpec> {
         }
     };
     Ok(CollectionSpec {
-        name: ident.value.clone(),
+        collection_id: ident.value.clone(),
+        parent_path: None,
         is_group: false,
     })
 }
@@ -1131,7 +1162,8 @@ mod tests {
             parse_sql("SELECT * FROM users WHERE age >= 18 ORDER BY age DESC LIMIT 10").unwrap();
         match stmt {
             StatementAst::Select(select) => {
-                assert_eq!(select.collection.name, "users");
+                assert_eq!(select.collection.collection_id, "users");
+                assert!(select.collection.parent_path.is_none());
                 assert!(!select.collection.is_group);
                 assert!(matches!(
                     select.projection,
@@ -1151,7 +1183,8 @@ mod tests {
             parse_sql("SELECT name FROM collection_group('profiles') WHERE active = true").unwrap();
         match stmt {
             StatementAst::Select(select) => {
-                assert_eq!(select.collection.name, "profiles");
+                assert_eq!(select.collection.collection_id, "profiles");
+                assert!(select.collection.parent_path.is_none());
                 assert!(select.collection.is_group);
                 assert!(matches!(
                     select.projection,
@@ -1181,10 +1214,86 @@ mod tests {
                 .unwrap();
         match stmt {
             StatementAst::Delete(delete) => {
-                assert_eq!(delete.collection.name, "logs");
+                assert_eq!(delete.collection.collection_id, "logs");
+                assert!(delete.collection.parent_path.is_none());
                 assert!(delete.collection.is_group);
             }
             _ => panic!("expected delete"),
+        }
+    }
+
+    #[test]
+    fn parse_collection_shorthand() {
+        let stmt = parse_sql("SELECT * FROM collection('posts') WHERE draft = false").unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert_eq!(select.collection.collection_id, "posts");
+                assert!(select.collection.parent_path.is_none());
+                assert!(!select.collection.is_group);
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_collection_subcollection() {
+        let stmt =
+            parse_sql("SELECT * FROM collection('users/user1/posts') WHERE author = 'x'").unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert_eq!(select.collection.collection_id, "posts");
+                assert_eq!(
+                    select.collection.parent_path.as_deref(),
+                    Some("users/user1")
+                );
+                assert!(!select.collection.is_group);
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn parse_update_delete_collection_subcollection() {
+        let u =
+            parse_sql("UPDATE collection('users/user1/posts') SET ok = true WHERE n = 1").unwrap();
+        match u {
+            StatementAst::Update(up) => {
+                assert_eq!(up.collection.collection_id, "posts");
+                assert_eq!(up.collection.parent_path.as_deref(), Some("users/user1"));
+            }
+            _ => panic!("expected update"),
+        }
+        let d = parse_sql("DELETE FROM collection('users/user1/posts') WHERE n = 1").unwrap();
+        match d {
+            StatementAst::Delete(del) => {
+                assert_eq!(del.collection.collection_id, "posts");
+                assert_eq!(del.collection.parent_path.as_deref(), Some("users/user1"));
+            }
+            _ => panic!("expected delete"),
+        }
+    }
+
+    #[test]
+    fn parse_join_collection_subcollection() {
+        let sql = "SELECT * FROM collection('users/user1/posts') p INNER JOIN users u ON u.id = p.author_id";
+        parse_sql(sql).unwrap();
+    }
+
+    #[test]
+    fn collection_path_rejects_invalid() {
+        for bad in [
+            "",
+            "/users/u1/posts",
+            "users/u1/posts/",
+            "users//u1/posts",
+            "users/u1",
+        ] {
+            let err =
+                parse_sql(&format!("SELECT * FROM collection('{bad}') WHERE x = 1")).unwrap_err();
+            assert!(
+                err.to_string().contains(super::COLLECTION_PATH_ERR),
+                "unexpected err for {bad:?}: {err}"
+            );
         }
     }
 
@@ -1390,10 +1499,10 @@ mod tests {
         let stmt = parse_sql(sql).unwrap();
         match stmt {
             StatementAst::Select(select) => {
-                assert_eq!(select.collection.name, "users");
+                assert_eq!(select.collection.collection_id, "users");
                 let join = select.joins.as_ref().expect("should have join");
                 assert_eq!(join.len(), 1);
-                assert_eq!(join[0].collection.name, "orders");
+                assert_eq!(join[0].collection.collection_id, "orders");
                 assert!(matches!(join[0].join_type, JoinType::Inner));
                 assert_eq!(join[0].left_field, "id");
                 assert_eq!(join[0].right_field, "user_id");
