@@ -170,7 +170,10 @@ async fn execute_join_select(
     stmt: &crate::sql::SelectStatement,
     joins: &[JoinSpec],
 ) -> Result<FireqlOutput> {
-    let left_alias = stmt.alias.as_deref().unwrap_or(&stmt.collection.collection_id);
+    let left_alias = stmt
+        .alias
+        .as_deref()
+        .unwrap_or(&stmt.collection.collection_id);
     let stripped_filter = stmt
         .filter
         .as_ref()

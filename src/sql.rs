@@ -432,7 +432,9 @@ fn parse_table_with_joins_for_select(
             parse_join_on_expr(join_type.1)?;
 
         let left_name = alias.as_deref().unwrap_or(&collection.collection_id);
-        let right_name = right_alias.as_deref().unwrap_or(&right_collection.collection_id);
+        let right_name = right_alias
+            .as_deref()
+            .unwrap_or(&right_collection.collection_id);
 
         let (left_alias_on, left_field, right_alias_on, right_field) =
             match (&first_qualifier, &second_qualifier) {
@@ -1235,10 +1237,8 @@ mod tests {
 
     #[test]
     fn parse_collection_subcollection() {
-        let stmt = parse_sql(
-            "SELECT * FROM collection('users/user1/posts') WHERE author = 'x'",
-        )
-        .unwrap();
+        let stmt =
+            parse_sql("SELECT * FROM collection('users/user1/posts') WHERE author = 'x'").unwrap();
         match stmt {
             StatementAst::Select(select) => {
                 assert_eq!(select.collection.collection_id, "posts");
@@ -1254,8 +1254,8 @@ mod tests {
 
     #[test]
     fn parse_update_delete_collection_subcollection() {
-        let u = parse_sql("UPDATE collection('users/user1/posts') SET ok = true WHERE n = 1")
-            .unwrap();
+        let u =
+            parse_sql("UPDATE collection('users/user1/posts') SET ok = true WHERE n = 1").unwrap();
         match u {
             StatementAst::Update(up) => {
                 assert_eq!(up.collection.collection_id, "posts");
@@ -1288,10 +1288,8 @@ mod tests {
             "users//u1/posts",
             "users/u1",
         ] {
-            let err = parse_sql(&format!(
-                "SELECT * FROM collection('{bad}') WHERE x = 1"
-            ))
-            .unwrap_err();
+            let err =
+                parse_sql(&format!("SELECT * FROM collection('{bad}') WHERE x = 1")).unwrap_err();
             assert!(
                 err.to_string().contains(super::COLLECTION_PATH_ERR),
                 "unexpected err for {bad:?}: {err}"

@@ -152,20 +152,10 @@ async fn emulator_collection_subcollection_queries() -> Result<(), Box<dyn std::
         .await?;
 
     let _: serde_json::Value = db
-        .create_obj(
-            &parents_col,
-            Some("a"),
-            &json!({"label": "A"}),
-            None,
-        )
+        .create_obj(&parents_col, Some("a"), &json!({"label": "A"}), None)
         .await?;
     let _: serde_json::Value = db
-        .create_obj(
-            &parents_col,
-            Some("b"),
-            &json!({"label": "B"}),
-            None,
-        )
+        .create_obj(&parents_col, Some("b"), &json!({"label": "B"}), None)
         .await?;
 
     let parent_a = format!("{}/{}/{}", db.get_documents_path(), parents_col, "a");
@@ -191,9 +181,8 @@ async fn emulator_collection_subcollection_queries() -> Result<(), Box<dyn std::
         .await?;
 
     let rel_a_posts = format!("{parents_col}/a/posts");
-    let scoped_sql = format!(
-        "SELECT title, n FROM collection('{rel_a_posts}') WHERE title = '{title_a}'"
-    );
+    let scoped_sql =
+        format!("SELECT title, n FROM collection('{rel_a_posts}') WHERE title = '{title_a}'");
     let output = fireql.execute(&scoped_sql).await?;
     match output {
         FireqlOutput::Rows(rows) => {
@@ -233,18 +222,16 @@ async fn emulator_collection_subcollection_queries() -> Result<(), Box<dyn std::
         _ => panic!("expected rows"),
     }
 
-    let update_sql = format!(
-        "UPDATE collection('{rel_a_posts}') SET n = 99 WHERE title = '{title_a}'"
-    );
+    let update_sql =
+        format!("UPDATE collection('{rel_a_posts}') SET n = 99 WHERE title = '{title_a}'");
     let output = fireql.execute(&update_sql).await?;
     match output {
         FireqlOutput::Affected { affected } => assert_eq!(affected, 1),
         _ => panic!("expected affected"),
     }
 
-    let check_b_sql = format!(
-        "SELECT n FROM collection('{parents_col}/b/posts') WHERE title = '{title_b}'"
-    );
+    let check_b_sql =
+        format!("SELECT n FROM collection('{parents_col}/b/posts') WHERE title = '{title_b}'");
     let output = fireql.execute(&check_b_sql).await?;
     match output {
         FireqlOutput::Rows(rows) => {
@@ -257,27 +244,22 @@ async fn emulator_collection_subcollection_queries() -> Result<(), Box<dyn std::
         _ => panic!("expected rows"),
     }
 
-    let delete_sql = format!(
-        "DELETE FROM collection('{rel_a_posts}') WHERE title = '{title_a}'"
-    );
+    let delete_sql = format!("DELETE FROM collection('{rel_a_posts}') WHERE title = '{title_a}'");
     let output = fireql.execute(&delete_sql).await?;
     match output {
         FireqlOutput::Affected { affected } => assert_eq!(affected, 1),
         _ => panic!("expected affected"),
     }
 
-    let verify_sql = format!(
-        "SELECT * FROM collection('{rel_a_posts}') WHERE title = '{title_a}'"
-    );
+    let verify_sql = format!("SELECT * FROM collection('{rel_a_posts}') WHERE title = '{title_a}'");
     let output = fireql.execute(&verify_sql).await?;
     match output {
         FireqlOutput::Rows(rows) => assert_eq!(rows.len(), 0),
         _ => panic!("expected rows"),
     }
 
-    let verify_b_sql = format!(
-        "SELECT title FROM collection('{parents_col}/b/posts') WHERE title = '{title_b}'"
-    );
+    let verify_b_sql =
+        format!("SELECT title FROM collection('{parents_col}/b/posts') WHERE title = '{title_b}'");
     let output = fireql.execute(&verify_b_sql).await?;
     match output {
         FireqlOutput::Rows(rows) => assert_eq!(rows.len(), 1),
@@ -291,8 +273,8 @@ async fn emulator_collection_subcollection_queries() -> Result<(), Box<dyn std::
 /// `collection(...)` has `parent_path` (subcollection): `doc_path` must include
 /// `{documents_path}/{parent_path}/{collection_id}`.
 #[tokio::test]
-async fn emulator_inner_join_subcollection_right_document_name() -> Result<(), Box<dyn std::error::Error>>
-{
+async fn emulator_inner_join_subcollection_right_document_name(
+) -> Result<(), Box<dyn std::error::Error>> {
     if should_skip() {
         eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
         return Ok(());
