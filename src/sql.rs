@@ -256,7 +256,14 @@ fn try_parse_insert_collection_function(input: &str) -> Result<Option<StatementA
         return Ok(None);
     };
 
+    let after_collection = after_collection.trim_start();
     if !after_collection.starts_with('(') {
+        return Ok(None);
+    }
+    let Some(first_arg_char) = after_collection[1..].trim_start().chars().next() else {
+        return Ok(None);
+    };
+    if first_arg_char != '\'' && first_arg_char != '"' {
         return Ok(None);
     }
 
@@ -482,12 +489,13 @@ fn validate_insert_select_projection(
                     "INSERT destination columns must match SELECT field count".to_string(),
                 ));
             }
-            if columns.iter().any(|column| column == "__name__")
-                && !fields.iter().any(|field| field == "__name__")
-            {
-                return Err(FireqlError::Unsupported(
-                    "__name__ destination column requires __name__ in SELECT fields".to_string(),
-                ));
+            for (idx, column) in columns.iter().enumerate() {
+                if column == "__name__" && fields.get(idx).map(String::as_str) != Some("__name__") {
+                    return Err(FireqlError::Unsupported(
+                        "__name__ destination column requires __name__ at the same SELECT field position"
+                            .to_string(),
+                    ));
+                }
             }
             Ok(())
         }
@@ -1626,6 +1634,15 @@ mod tests {
     }
 
     #[test]
+    fn insert_select_name_destination_requires_positional_name_source() {
+        let err = parse_sql(
+            "INSERT INTO archived_users (__name__, name) SELECT name, __name__ FROM users",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("same SELECT field position"));
+    }
+
+    #[test]
     fn insert_select_rejects_aggregation() {
         let err = parse_sql("INSERT INTO archived_users SELECT COUNT(*) FROM users").unwrap_err();
         assert!(err.to_string().contains("Aggregation is not supported"));
@@ -1636,6 +1653,19 @@ mod tests {
         let err = parse_sql("INSERT INTO archived_users SELECT * FROM collection_group('users')")
             .unwrap_err();
         assert!(err.to_string().contains("collection_group"));
+    }
+
+    #[test]
+    fn parse_insert_select_collection_named_collection_without_space_before_columns() {
+        let stmt = parse_sql("INSERT INTO collection(name) SELECT name FROM users").unwrap();
+
+        match stmt {
+            StatementAst::InsertSelect(insert) => {
+                assert_eq!(insert.collection.collection_id, "collection");
+                assert_eq!(insert.columns.as_ref().expect("columns"), &vec!["name"]);
+            }
+            other => panic!("expected insert select, got {other:?}"),
+        }
     }
 
     #[test]
