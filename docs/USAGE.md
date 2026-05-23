@@ -137,6 +137,14 @@ match output {
 
 `WHERE` は必須です。
 
+### INSERT SELECT
+
+- `INSERT INTO <collection> SELECT * FROM <collection> WHERE ...`
+- `INSERT INTO collection('...') SELECT * FROM collection('...') WHERE ...`
+- `INSERT INTO <collection> (__name__, field1) SELECT __name__, field1 FROM <collection> WHERE ...`
+
+`__name__` を destination column に含めた場合は元 document ID を使います。含めない場合は新しい document ID が生成されます。`VALUES` / `UPSERT` / 集約 / JOIN / `collection_group()` source は未対応です。
+
 ## 4. WHERE で使える演算子 / 値関数
 
 - 比較: `=`, `!=`, `<`, `<=`, `>`, `>=`
@@ -208,7 +216,7 @@ SELECT AVG(score) FROM users WHERE active = true;
 { "total": { "_firestore_type": "double", "value": 456.78 } }
 ```
 
-### UPDATE / DELETE
+### INSERT SELECT / UPDATE / DELETE
 
 ```json
 { "affected": 5 }
@@ -217,6 +225,8 @@ SELECT AVG(score) FROM users WHERE active = true;
 ## 7. Firestore 制約（実装で検証）
 
 - `UPDATE` / `DELETE` は `WHERE` 必須
+- `INSERT SELECT` の source は通常 collection または `collection('...')` のみ対応
+- `INSERT SELECT` は `VALUES` / `UPSERT` / 集約 / JOIN / `collection_group()` source 非対応
 - 不等号（`<`, `<=`, `>`, `>=`, `!=`, `NOT IN`）がある場合、最初の `ORDER BY` が同じフィールドである必要がある
 - `IN` / `NOT IN` は最大 10 件まで
 - `NOT IN` は `IN` / `!=` と併用不可

@@ -137,6 +137,14 @@ match output {
 
 `WHERE` is required.
 
+### INSERT SELECT
+
+- `INSERT INTO <collection> SELECT * FROM <collection> WHERE ...`
+- `INSERT INTO collection('...') SELECT * FROM collection('...') WHERE ...`
+- `INSERT INTO <collection> (__name__, field1) SELECT __name__, field1 FROM <collection> WHERE ...`
+
+When `__name__` appears in the destination columns, the source document ID is reused. Without `__name__`, new document IDs are generated. `VALUES`, `UPSERT`, aggregation, JOIN, and `collection_group()` sources are not supported.
+
 ## 4. WHERE Operators / Value Functions
 
 - Comparison: `=`, `!=`, `<`, `<=`, `>`, `>=`
@@ -208,7 +216,7 @@ SELECT AVG(score) FROM users WHERE active = true;
 { "total": { "_firestore_type": "double", "value": 456.78 } }
 ```
 
-### UPDATE / DELETE
+### INSERT SELECT / UPDATE / DELETE
 
 ```json
 { "affected": 5 }
@@ -217,6 +225,8 @@ SELECT AVG(score) FROM users WHERE active = true;
 ## 7. Firestore Constraints (Validated at Query Time)
 
 - `UPDATE` / `DELETE` require a `WHERE` clause
+- `INSERT SELECT` sources must be normal collections or `collection('...')`
+- `INSERT SELECT` does not support `VALUES`, `UPSERT`, aggregation, JOIN, or `collection_group()` sources
 - When using inequality operators (`<`, `<=`, `>`, `>=`, `!=`, `NOT IN`), the first `ORDER BY` field must match the inequality field
 - `IN` / `NOT IN` support up to 10 values
 - `NOT IN` cannot be combined with `IN` or `!=`

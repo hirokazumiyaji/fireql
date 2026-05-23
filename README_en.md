@@ -10,6 +10,7 @@ A Rust CLI / library for querying Firestore with SQL.
 - `WHERE` (AND / OR / comparison / IN / IS NULL / array_contains / array_contains_any / ref / timestamp / CURRENT_TIMESTAMP)
 - Aggregation: `COUNT`, `SUM`, `AVG`
 - `ORDER BY` / `LIMIT`
+- `INSERT INTO ... SELECT ...`
 - `UPDATE ... SET ... WHERE ...`
 - `DELETE FROM ... WHERE ...`
 
@@ -26,6 +27,8 @@ SELECT * FROM users WHERE created_at >= timestamp('2024-01-01T00:00:00Z');
 SELECT * FROM users WHERE created_at >= CURRENT_TIMESTAMP;
 SELECT COUNT(*) FROM users WHERE active = true;
 SELECT SUM(score) AS total FROM users WHERE active = true;
+INSERT INTO archived_users SELECT * FROM users WHERE disabled = true;
+INSERT INTO archived_users (__name__, name) SELECT __name__, name FROM users WHERE disabled = true;
 UPDATE users SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE last_login < '2024-01-01';
 DELETE FROM users WHERE disabled = true;
 DELETE FROM collection_group('logs') WHERE created_at < '2023-01-01';
@@ -41,7 +44,7 @@ fireql --project-id my-project --sql "SELECT * FROM users LIMIT 5" --pretty
 cat query.sql | fireql --project-id my-project
 ```
 
-Use `--batch-parallelism` to parallelize batch writes for UPDATE/DELETE.
+Use `--batch-parallelism` to parallelize batch writes for INSERT SELECT/UPDATE/DELETE.
 
 ```bash
 fireql --project-id my-project --sql "DELETE FROM users WHERE disabled = true" --batch-parallelism 4
