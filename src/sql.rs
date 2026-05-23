@@ -263,7 +263,7 @@ fn try_parse_insert_collection_function(input: &str) -> Result<Option<StatementA
     let Some(first_arg_char) = after_collection[1..].trim_start().chars().next() else {
         return Ok(None);
     };
-    if first_arg_char != '\'' && first_arg_char != '"' {
+    if first_arg_char != '\'' {
         return Ok(None);
     }
 
@@ -1658,6 +1658,19 @@ mod tests {
     #[test]
     fn parse_insert_select_collection_named_collection_without_space_before_columns() {
         let stmt = parse_sql("INSERT INTO collection(name) SELECT name FROM users").unwrap();
+
+        match stmt {
+            StatementAst::InsertSelect(insert) => {
+                assert_eq!(insert.collection.collection_id, "collection");
+                assert_eq!(insert.columns.as_ref().expect("columns"), &vec!["name"]);
+            }
+            other => panic!("expected insert select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_select_collection_named_collection_with_quoted_column() {
+        let stmt = parse_sql("INSERT INTO collection(\"name\") SELECT name FROM users").unwrap();
 
         match stmt {
             StatementAst::InsertSelect(insert) => {
