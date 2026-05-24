@@ -3,7 +3,7 @@ use serde_json::Value as JsonValue;
 use sqlparser::ast::{
     AssignmentTarget, Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
     JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, OrderByExpr, OrderByKind, Query,
-    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins, Value,
+    Select, SelectItem, SetExpr, Statement, TableFactor, TableObject, TableWithJoins, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -13,6 +13,7 @@ pub enum StatementAst {
     Select(SelectStatement),
     Update(UpdateStatement),
     Delete(DeleteStatement),
+    InsertSelect(InsertSelectStatement),
 }
 
 #[derive(Debug, Clone)]
@@ -98,6 +99,13 @@ pub struct DeleteStatement {
 }
 
 #[derive(Debug, Clone)]
+pub struct InsertSelectStatement {
+    pub collection: CollectionSpec,
+    pub columns: Option<Vec<String>>,
+    pub source: SelectStatement,
+}
+
+#[derive(Debug, Clone)]
 pub struct OrderBy {
     pub field: String,
     pub direction: OrderDirection,
@@ -173,6 +181,9 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
     if let Some(stmt) = try_parse_delete_table_function(input)? {
         return Ok(stmt);
     }
+    if let Some(stmt) = try_parse_insert_collection_function(input)? {
+        return Ok(stmt);
+    }
 
     let dialect = GenericDialect {};
     let mut statements =
@@ -227,9 +238,267 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
                 limit,
             }))
         }
+        Statement::Insert(insert) => parse_insert_select(insert, None),
         other => Err(FireqlError::Unsupported(format!(
             "Unsupported statement: {other:?}"
         ))),
+    }
+}
+
+fn try_parse_insert_collection_function(input: &str) -> Result<Option<StatementAst>> {
+    let Some(after_insert) = strip_keyword(input, "insert") else {
+        return Ok(None);
+    };
+    let Some(after_into) = strip_keyword(after_insert, "into") else {
+        return Ok(None);
+    };
+    let Some(after_collection) = strip_keyword(after_into, "collection") else {
+        return Ok(None);
+    };
+
+    let after_collection = after_collection.trim_start();
+    if !after_collection.starts_with('(') {
+        return Ok(None);
+    }
+    let Some(first_arg_char) = after_collection[1..].trim_start().chars().next() else {
+        return Ok(None);
+    };
+    if first_arg_char != '\'' {
+        return Ok(None);
+    }
+
+    let close = find_matching_paren(after_collection, 0)
+        .ok_or_else(|| FireqlError::SqlParse("Unclosed collection() target".to_string()))?;
+    let target_expr = format!("collection{}", &after_collection[..=close]);
+    let target = parse_collection_target_expr(&target_expr)?;
+    let remainder = after_collection[close + 1..].trim_start();
+    let rewritten = format!("INSERT INTO __fireql_insert_target {remainder}");
+
+    let dialect = GenericDialect {};
+    let mut statements = Parser::parse_sql(&dialect, &rewritten)
+        .map_err(|e| FireqlError::SqlParse(e.to_string()))?;
+    if statements.len() != 1 {
+        return Err(FireqlError::Unsupported(
+            "Only a single SQL statement is supported".to_string(),
+        ));
+    }
+
+    match statements.remove(0) {
+        Statement::Insert(insert) => parse_insert_select(insert, Some(target)).map(Some),
+        _ => Err(FireqlError::Unsupported(
+            "INSERT rewrite produced unsupported statement".to_string(),
+        )),
+    }
+}
+
+fn strip_keyword<'a>(input: &'a str, keyword: &str) -> Option<&'a str> {
+    let trimmed = input.trim_start();
+    let prefix = trimmed.get(..keyword.len())?;
+    if !prefix.eq_ignore_ascii_case(keyword) {
+        return None;
+    }
+    let rest = &trimmed[keyword.len()..];
+    match rest.chars().next() {
+        Some(c) if c.is_ascii_alphanumeric() || c == '_' => None,
+        _ => Some(rest),
+    }
+}
+
+fn find_matching_paren(input: &str, open_idx: usize) -> Option<usize> {
+    let bytes = input.as_bytes();
+    let mut depth = 0usize;
+    let mut quote = None;
+    let mut idx = open_idx;
+
+    while idx < bytes.len() {
+        let b = bytes[idx];
+        if let Some(q) = quote {
+            if b == q {
+                if bytes.get(idx + 1) == Some(&q) {
+                    idx += 2;
+                    continue;
+                }
+                quote = None;
+            }
+            idx += 1;
+            continue;
+        }
+
+        match b {
+            b'\'' | b'"' => quote = Some(b),
+            b'(' => depth += 1,
+            b')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(idx);
+                }
+            }
+            _ => {}
+        }
+        idx += 1;
+    }
+
+    None
+}
+
+fn parse_collection_target_expr(target_expr: &str) -> Result<CollectionSpec> {
+    let sql = format!("SELECT * FROM {target_expr}");
+    let dialect = GenericDialect {};
+    let mut statements =
+        Parser::parse_sql(&dialect, &sql).map_err(|e| FireqlError::SqlParse(e.to_string()))?;
+    match statements.remove(0) {
+        Statement::Query(query) => match parse_query(*query)? {
+            StatementAst::Select(select) => Ok(select.collection),
+            _ => Err(FireqlError::Unsupported(
+                "INSERT target rewrite produced unsupported statement".to_string(),
+            )),
+        },
+        _ => Err(FireqlError::Unsupported(
+            "INSERT target rewrite produced unsupported statement".to_string(),
+        )),
+    }
+}
+
+fn parse_insert_select(
+    insert: sqlparser::ast::Insert,
+    collection_override: Option<CollectionSpec>,
+) -> Result<StatementAst> {
+    if !insert.into
+        || insert.optimizer_hint.is_some()
+        || insert.or.is_some()
+        || insert.ignore
+        || insert.table_alias.is_some()
+        || insert.overwrite
+        || insert.partitioned.is_some()
+        || !insert.after_columns.is_empty()
+        || !insert.assignments.is_empty()
+        || insert.on.is_some()
+        || insert.returning.is_some()
+        || insert.replace_into
+        || insert.priority.is_some()
+        || insert.insert_alias.is_some()
+        || insert.settings.is_some()
+        || insert.format_clause.is_some()
+        || insert.has_table_keyword
+    {
+        return Err(FireqlError::Unsupported(
+            "Only INSERT INTO ... SELECT is supported".to_string(),
+        ));
+    }
+
+    let collection = match collection_override {
+        Some(collection) => collection,
+        None => parse_insert_target(&insert.table)?,
+    };
+    if collection.is_group {
+        return Err(FireqlError::Unsupported(
+            "collection_group() is not supported as INSERT target".to_string(),
+        ));
+    }
+
+    let source = insert.source.ok_or_else(|| {
+        FireqlError::Unsupported("Only INSERT INTO ... SELECT is supported".to_string())
+    })?;
+    let source = match parse_query(*source)? {
+        StatementAst::Select(select) => select,
+        _ => {
+            return Err(FireqlError::Unsupported(
+                "INSERT source must be a SELECT query".to_string(),
+            ))
+        }
+    };
+
+    if source.collection.is_group {
+        return Err(FireqlError::Unsupported(
+            "collection_group() is not supported in INSERT SELECT".to_string(),
+        ));
+    }
+    if source.joins.is_some() {
+        return Err(FireqlError::Unsupported(
+            "JOIN is not supported in INSERT SELECT".to_string(),
+        ));
+    }
+    let columns = if insert.columns.is_empty() {
+        None
+    } else {
+        Some(
+            insert
+                .columns
+                .into_iter()
+                .map(|c| c.value)
+                .collect::<Vec<_>>(),
+        )
+    };
+    validate_insert_select_projection(columns.as_deref(), &source.projection)?;
+
+    Ok(StatementAst::InsertSelect(InsertSelectStatement {
+        collection,
+        columns,
+        source,
+    }))
+}
+
+fn parse_insert_target(target: &TableObject) -> Result<CollectionSpec> {
+    match target {
+        TableObject::TableName(name) => parse_object_name(name),
+        TableObject::TableFunction(function) => {
+            let name = object_name_to_string(&function.name);
+            if !name.eq_ignore_ascii_case("collection") {
+                return Err(FireqlError::Unsupported(format!(
+                    "Unsupported INSERT target function: {name}"
+                )));
+            }
+            let args = extract_function_arg_list(&function.args)?;
+            parse_collection_args(args)
+        }
+    }
+}
+
+fn validate_insert_select_projection(
+    columns: Option<&[String]>,
+    projection: &SelectProjection,
+) -> Result<()> {
+    match (columns, projection) {
+        (None, SelectProjection::Fields(Projection::All)) => Ok(()),
+        (None, SelectProjection::Fields(Projection::Fields(_))) => Err(FireqlError::Unsupported(
+            "INSERT SELECT without destination columns requires SELECT *".to_string(),
+        )),
+        (None, SelectProjection::Aggregations(_))
+        | (Some(_), SelectProjection::Aggregations(_)) => Err(FireqlError::Unsupported(
+            "Aggregation is not supported in INSERT SELECT".to_string(),
+        )),
+        (Some(columns), SelectProjection::Fields(Projection::All)) => {
+            if columns.is_empty() {
+                return Err(FireqlError::Unsupported(
+                    "INSERT destination columns cannot be empty".to_string(),
+                ));
+            }
+            Err(FireqlError::Unsupported(
+                "INSERT SELECT with destination columns requires explicit SELECT fields"
+                    .to_string(),
+            ))
+        }
+        (Some(columns), SelectProjection::Fields(Projection::Fields(fields))) => {
+            if columns.is_empty() {
+                return Err(FireqlError::Unsupported(
+                    "INSERT destination columns cannot be empty".to_string(),
+                ));
+            }
+            if columns.len() != fields.len() {
+                return Err(FireqlError::Unsupported(
+                    "INSERT destination columns must match SELECT field count".to_string(),
+                ));
+            }
+            for (idx, column) in columns.iter().enumerate() {
+                if column == "__name__" && fields.get(idx).map(String::as_str) != Some("__name__") {
+                    return Err(FireqlError::Unsupported(
+                        "__name__ destination column requires __name__ at the same SELECT field position"
+                            .to_string(),
+                    ));
+                }
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1270,6 +1539,145 @@ mod tests {
                 assert_eq!(del.collection.parent_path.as_deref(), Some("users/user1"));
             }
             _ => panic!("expected delete"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_select_auto_id_copy() {
+        let stmt =
+            parse_sql("INSERT INTO archived_users SELECT * FROM users WHERE disabled = true")
+                .unwrap();
+
+        match stmt {
+            StatementAst::InsertSelect(insert) => {
+                assert_eq!(insert.collection.collection_id, "archived_users");
+                assert!(insert.columns.is_none());
+                assert_eq!(insert.source.collection.collection_id, "users");
+                assert!(matches!(
+                    insert.source.projection,
+                    SelectProjection::Fields(Projection::All)
+                ));
+                assert!(insert.source.filter.is_some());
+            }
+            other => panic!("expected insert select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_select_subcollections() {
+        let stmt = parse_sql(
+            "INSERT INTO collection('users/u1/archive') \
+             SELECT * FROM collection('users/u1/posts') WHERE published = false",
+        )
+        .unwrap();
+
+        match stmt {
+            StatementAst::InsertSelect(insert) => {
+                assert_eq!(insert.collection.collection_id, "archive");
+                assert_eq!(insert.collection.parent_path.as_deref(), Some("users/u1"));
+                assert_eq!(insert.source.collection.collection_id, "posts");
+                assert_eq!(
+                    insert.source.collection.parent_path.as_deref(),
+                    Some("users/u1")
+                );
+            }
+            other => panic!("expected insert select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_select_with_id_preservation_columns() {
+        let stmt = parse_sql(
+            "INSERT INTO archived_users (__name__, name, age) \
+             SELECT __name__, name, age FROM users WHERE disabled = true",
+        )
+        .unwrap();
+
+        match stmt {
+            StatementAst::InsertSelect(insert) => {
+                assert_eq!(
+                    insert.columns.as_ref().expect("columns"),
+                    &vec![
+                        "__name__".to_string(),
+                        "name".to_string(),
+                        "age".to_string()
+                    ]
+                );
+                assert!(matches!(
+                    insert.source.projection,
+                    SelectProjection::Fields(Projection::Fields(_))
+                ));
+            }
+            other => panic!("expected insert select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_select_allows_collection_named_collection_with_columns() {
+        let stmt = parse_sql("INSERT INTO collection (name) SELECT name FROM users").unwrap();
+
+        match stmt {
+            StatementAst::InsertSelect(insert) => {
+                assert_eq!(insert.collection.collection_id, "collection");
+                assert_eq!(insert.columns.as_ref().expect("columns"), &vec!["name"]);
+            }
+            other => panic!("expected insert select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn insert_select_name_destination_requires_name_source() {
+        let err =
+            parse_sql("INSERT INTO archived_users (__name__, name) SELECT id, name FROM users")
+                .unwrap_err();
+        assert!(err.to_string().contains("__name__"));
+    }
+
+    #[test]
+    fn insert_select_name_destination_requires_positional_name_source() {
+        let err = parse_sql(
+            "INSERT INTO archived_users (__name__, name) SELECT name, __name__ FROM users",
+        )
+        .unwrap_err();
+        assert!(err.to_string().contains("same SELECT field position"));
+    }
+
+    #[test]
+    fn insert_select_rejects_aggregation() {
+        let err = parse_sql("INSERT INTO archived_users SELECT COUNT(*) FROM users").unwrap_err();
+        assert!(err.to_string().contains("Aggregation is not supported"));
+    }
+
+    #[test]
+    fn insert_select_rejects_collection_group_source() {
+        let err = parse_sql("INSERT INTO archived_users SELECT * FROM collection_group('users')")
+            .unwrap_err();
+        assert!(err.to_string().contains("collection_group"));
+    }
+
+    #[test]
+    fn parse_insert_select_collection_named_collection_without_space_before_columns() {
+        let stmt = parse_sql("INSERT INTO collection(name) SELECT name FROM users").unwrap();
+
+        match stmt {
+            StatementAst::InsertSelect(insert) => {
+                assert_eq!(insert.collection.collection_id, "collection");
+                assert_eq!(insert.columns.as_ref().expect("columns"), &vec!["name"]);
+            }
+            other => panic!("expected insert select, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_insert_select_collection_named_collection_with_quoted_column() {
+        let stmt = parse_sql("INSERT INTO collection(\"name\") SELECT name FROM users").unwrap();
+
+        match stmt {
+            StatementAst::InsertSelect(insert) => {
+                assert_eq!(insert.collection.collection_id, "collection");
+                assert_eq!(insert.columns.as_ref().expect("columns"), &vec!["name"]);
+            }
+            other => panic!("expected insert select, got {other:?}"),
         }
     }
 

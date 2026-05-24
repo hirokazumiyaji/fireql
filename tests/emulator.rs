@@ -66,6 +66,172 @@ async fn emulator_select_update_delete() -> Result<(), Box<dyn std::error::Error
 }
 
 #[tokio::test]
+async fn emulator_insert_select_auto_id_copy() -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let suffix = unique_suffix();
+    let source = format!("fireql_insert_source_{suffix}");
+    let dest = format!("fireql_insert_dest_{suffix}");
+
+    let _: serde_json::Value = db
+        .create_obj(
+            &source,
+            Some("u1"),
+            &json!({"name": "Alice", "disabled": true, "score": 10}),
+            None,
+        )
+        .await?;
+    let _: serde_json::Value = db
+        .create_obj(
+            &source,
+            Some("u2"),
+            &json!({"name": "Bob", "disabled": false, "score": 20}),
+            None,
+        )
+        .await?;
+
+    let output = fireql
+        .execute(&format!(
+            "INSERT INTO {dest} SELECT * FROM {source} WHERE disabled = true"
+        ))
+        .await?;
+    match output {
+        FireqlOutput::Affected { affected } => assert_eq!(affected, 1),
+        other => panic!("expected affected, got {other:?}"),
+    }
+
+    let output = fireql
+        .execute(&format!("SELECT * FROM {dest} WHERE disabled = true"))
+        .await?;
+    match output {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_ne!(rows[0].id, "u1");
+            match rows[0].data.get("name") {
+                Some(FireqlValue::String(name)) => assert_eq!(name, "Alice"),
+                other => panic!("expected copied name, got {other:?}"),
+            }
+            match rows[0].data.get("score") {
+                Some(FireqlValue::Integer(score)) => assert_eq!(*score, 10),
+                other => panic!("expected copied score, got {other:?}"),
+            }
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_insert_select_preserves_id_when_name_column_is_used(
+) -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let suffix = unique_suffix();
+    let source = format!("fireql_insert_named_source_{suffix}");
+    let dest = format!("fireql_insert_named_dest_{suffix}");
+
+    let _: serde_json::Value = db
+        .create_obj(
+            &source,
+            Some("preserved_id"),
+            &json!({"name": "Alice", "disabled": true}),
+            None,
+        )
+        .await?;
+
+    let output = fireql
+        .execute(&format!(
+            "INSERT INTO {dest} (__name__, name) \
+             SELECT __name__, name FROM {source} WHERE disabled = true"
+        ))
+        .await?;
+    match output {
+        FireqlOutput::Affected { affected } => assert_eq!(affected, 1),
+        other => panic!("expected affected, got {other:?}"),
+    }
+
+    let output = fireql
+        .execute(&format!("SELECT * FROM {dest} WHERE name = 'Alice'"))
+        .await?;
+    match output {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, "preserved_id");
+            assert_eq!(rows[0].path, format!("{dest}/preserved_id"));
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_insert_select_empty_source_reports_zero() -> Result<(), Box<dyn std::error::Error>>
+{
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let suffix = unique_suffix();
+    let source = format!("fireql_insert_empty_source_{suffix}");
+    let dest = format!("fireql_insert_empty_dest_{suffix}");
+
+    let _: serde_json::Value = db
+        .create_obj(&source, Some("u1"), &json!({"disabled": false}), None)
+        .await?;
+
+    let output = fireql
+        .execute(&format!(
+            "INSERT INTO {dest} SELECT * FROM {source} WHERE disabled = true"
+        ))
+        .await?;
+    match output {
+        FireqlOutput::Affected { affected } => assert_eq!(affected, 0),
+        other => panic!("expected affected, got {other:?}"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn emulator_collection_group_select() -> Result<(), Box<dyn std::error::Error>> {
     if should_skip() {
         eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
