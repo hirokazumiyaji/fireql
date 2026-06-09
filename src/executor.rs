@@ -171,6 +171,30 @@ fn strip_alias_from_filter(filter: &FilterExpr, alias: &str) -> FilterExpr {
     }
 }
 
+/// Resolves the left-side join key for a join step against `current_result`.
+///
+/// `__name__` always resolves to the leading table's `DocOutput.id`, which is
+/// preserved across every join, so it must stay unqualified even on chained
+/// joins. Regular fields, by contrast, are prefixed with their alias on chained
+/// joins because the left rows are already prefixed (e.g. `u.dept_id`).
+/// A previous right table's `__name__` cannot be used: that id is never retained.
+fn effective_left_join_field(join: &JoinSpec, is_joined: bool, left_alias: &str) -> Result<String> {
+    if join.left_field == "__name__" {
+        let qualifier = join.left_alias.as_deref().unwrap_or(left_alias);
+        if is_joined && qualifier != left_alias {
+            return Err(FireqlError::Unsupported(format!(
+                "JOIN on `{qualifier}.__name__` is not supported; only the leading table's document id can be used as a join key"
+            )));
+        }
+        Ok("__name__".to_string())
+    } else if is_joined {
+        let alias = join.left_alias.as_deref().unwrap_or(left_alias);
+        Ok(format!("{alias}.{}", join.left_field))
+    } else {
+        Ok(join.left_field.clone())
+    }
+}
+
 async fn execute_join_select(
     db: &FirestoreDb,
     stmt: &crate::sql::SelectStatement,
@@ -199,12 +223,7 @@ async fn execute_join_select(
     let mut is_joined = false;
 
     for join in joins {
-        let effective_left_field = if is_joined {
-            let alias = join.left_alias.as_deref().unwrap_or(left_alias);
-            format!("{alias}.{}", join.left_field)
-        } else {
-            join.left_field.clone()
-        };
+        let effective_left_field = effective_left_join_field(join, is_joined, left_alias)?;
 
         let keys = extract_join_keys(&current_result, &effective_left_field)
             .map_err(FireqlError::Unsupported)?;
@@ -850,5 +869,59 @@ mod tests {
             parts.fields[0].1.value.value_type,
             Some(ValueType::StringValue("Alice".into()))
         );
+    }
+
+    fn join_spec(left_field: &str, right_field: &str, left_alias: Option<&str>) -> JoinSpec {
+        JoinSpec {
+            join_type: crate::sql::JoinType::Inner,
+            collection: CollectionSpec {
+                collection_id: "right".to_string(),
+                parent_path: None,
+                is_group: false,
+            },
+            left_field: left_field.to_string(),
+            right_field: right_field.to_string(),
+            left_alias: left_alias.map(|s| s.to_string()),
+            right_alias: None,
+        }
+    }
+
+    #[test]
+    fn effective_left_field_first_join_uses_field_as_is() {
+        let name_join = join_spec("__name__", "user_id", Some("u"));
+        assert_eq!(
+            effective_left_join_field(&name_join, false, "u").unwrap(),
+            "__name__"
+        );
+        let field_join = join_spec("dept_id", "__name__", Some("u"));
+        assert_eq!(
+            effective_left_join_field(&field_join, false, "u").unwrap(),
+            "dept_id"
+        );
+    }
+
+    #[test]
+    fn effective_left_field_chained_name_resolves_to_leading_id() {
+        let join = join_spec("__name__", "user_id", Some("u"));
+        assert_eq!(
+            effective_left_join_field(&join, true, "u").unwrap(),
+            "__name__"
+        );
+    }
+
+    #[test]
+    fn effective_left_field_chained_regular_field_is_prefixed() {
+        let join = join_spec("dept_id", "__name__", Some("u"));
+        assert_eq!(
+            effective_left_join_field(&join, true, "u").unwrap(),
+            "u.dept_id"
+        );
+    }
+
+    #[test]
+    fn effective_left_field_chained_prior_right_name_is_rejected() {
+        let join = join_spec("__name__", "order_id", Some("o"));
+        let err = effective_left_join_field(&join, true, "u").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
     }
 }
