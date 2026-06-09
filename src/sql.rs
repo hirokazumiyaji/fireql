@@ -603,20 +603,36 @@ fn parse_select(
     order_by_exprs: Vec<OrderByExpr>,
     limit_expr: Option<Expr>,
 ) -> Result<StatementAst> {
-    if select.distinct.is_some() {
-        return Err(FireqlError::Unsupported(
-            "DISTINCT is not supported".to_string(),
-        ));
+    // Reject clauses that sqlparser accepts but fireql does not translate, so they
+    // can never be silently dropped (e.g. TOP/QUALIFY would otherwise change the
+    // result set without warning).
+    let unsupported: &[(bool, &str)] = &[
+        (select.distinct.is_some(), "DISTINCT"),
+        (select.top.is_some(), "TOP"),
+        (select.having.is_some(), "HAVING"),
+        (select.qualify.is_some(), "QUALIFY"),
+        (select.prewhere.is_some(), "PREWHERE"),
+        (select.into.is_some(), "SELECT INTO"),
+        (select.exclude.is_some(), "EXCLUDE"),
+        (select.optimizer_hint.is_some(), "optimizer hints"),
+        (select.select_modifiers.is_some(), "SELECT modifiers"),
+        (select.value_table_mode.is_some(), "SELECT AS STRUCT/VALUE"),
+        (!select.lateral_views.is_empty(), "LATERAL VIEW"),
+        (!select.connect_by.is_empty(), "CONNECT BY"),
+        (!select.cluster_by.is_empty(), "CLUSTER BY"),
+        (!select.distribute_by.is_empty(), "DISTRIBUTE BY"),
+        (!select.sort_by.is_empty(), "SORT BY"),
+        (!select.named_window.is_empty(), "WINDOW"),
+    ];
+    if let Some((_, clause)) = unsupported.iter().find(|(present, _)| *present) {
+        return Err(FireqlError::Unsupported(format!(
+            "{clause} is not supported"
+        )));
     }
     if !matches!(select.group_by, sqlparser::ast::GroupByExpr::Expressions(ref exprs, _) if exprs.is_empty())
     {
         return Err(FireqlError::Unsupported(
             "GROUP BY is not supported".to_string(),
-        ));
-    }
-    if select.having.is_some() {
-        return Err(FireqlError::Unsupported(
-            "HAVING is not supported".to_string(),
         ));
     }
 
@@ -735,8 +751,17 @@ fn parse_table_with_joins_for_select(
 fn parse_table_factor_with_alias(factor: &TableFactor) -> Result<(CollectionSpec, Option<String>)> {
     match factor {
         TableFactor::Table {
-            name, alias, args, ..
+            name,
+            alias,
+            args,
+            sample,
+            ..
         } => {
+            if sample.is_some() {
+                return Err(FireqlError::Unsupported(
+                    "TABLESAMPLE is not supported".to_string(),
+                ));
+            }
             if let Some(tfa) = args {
                 let func_name = object_name_to_string(name);
                 if func_name.eq_ignore_ascii_case("collection_group") {
@@ -1898,6 +1923,54 @@ mod tests {
     #[test]
     fn offset_is_rejected() {
         let err = parse_sql("SELECT * FROM users LIMIT 10 OFFSET 20").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn top_is_rejected() {
+        let err = parse_sql("SELECT TOP 5 * FROM users").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn qualify_is_rejected() {
+        let err = parse_sql("SELECT * FROM users QUALIFY ROW_NUMBER() OVER () = 1").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn prewhere_is_rejected() {
+        let err = parse_sql("SELECT * FROM users PREWHERE active = true").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn cluster_by_is_rejected() {
+        let err = parse_sql("SELECT * FROM users CLUSTER BY name").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn sort_by_is_rejected() {
+        let err = parse_sql("SELECT * FROM users SORT BY name").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn window_clause_is_rejected() {
+        let err = parse_sql("SELECT * FROM users WINDOW w AS (PARTITION BY team)").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn select_into_is_rejected() {
+        let err = parse_sql("SELECT * INTO archived FROM users").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[test]
+    fn tablesample_is_rejected() {
+        let err = parse_sql("SELECT * FROM users TABLESAMPLE BERNOULLI (10)").unwrap_err();
         assert!(matches!(err, FireqlError::Unsupported(_)));
     }
 
