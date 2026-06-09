@@ -19,6 +19,7 @@ use futures::stream::{self, StreamExt};
 use gcloud_sdk::google::firestore::v1::{
     document_transform, precondition, write, Document, DocumentMask, Precondition, Write,
 };
+use gcloud_sdk::google::rpc::Status;
 use rand::{distributions::Alphanumeric, Rng};
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
@@ -369,7 +370,7 @@ async fn execute_insert_select(
         .map(|chunk| chunk.to_vec())
         .collect::<Vec<_>>();
     let mut affected = 0u64;
-    let mut first_error: Option<FireqlError> = None;
+    let mut first_error: Option<String> = None;
 
     let mut stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
@@ -396,28 +397,33 @@ async fn execute_insert_select(
                 }))?;
             }
 
-            batch.write().await?;
-            Ok::<usize, FireqlError>(chunk.len())
+            let response = batch.write().await?;
+            Ok::<(usize, Option<String>), FireqlError>(count_batch_outcome(
+                &response.statuses,
+                chunk.len(),
+            ))
         }
     }))
     .buffer_unordered(batch_parallelism);
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(count) => affected += count as u64,
+            Ok((count, write_error)) => {
+                affected += count as u64;
+                if first_error.is_none() {
+                    first_error = write_error;
+                }
+            }
             Err(err) => {
                 if first_error.is_none() {
-                    first_error = Some(err);
+                    first_error = Some(err.to_string());
                 }
             }
         }
     }
 
-    if let Some(err) = first_error {
-        return Err(FireqlError::PartialFailure {
-            affected,
-            error: err.to_string(),
-        });
+    if let Some(error) = first_error {
+        return Err(FireqlError::PartialFailure { affected, error });
     }
 
     Ok(FireqlOutput::Affected { affected })
@@ -516,6 +522,28 @@ fn generate_document_id() -> String {
         .collect()
 }
 
+/// The Firestore `BatchWrite` RPC is non-atomic: it returns `Ok` even when
+/// individual writes fail, reporting each result in `statuses` (code 0 = OK).
+/// Count only the writes that actually succeeded and surface the first failure,
+/// so e.g. an INSERT colliding with an existing id (FAILED_PRECONDITION) is not
+/// silently reported as affected.
+fn count_batch_outcome(statuses: &[Status], chunk_len: usize) -> (usize, Option<String>) {
+    let mut failures = 0usize;
+    let mut first_error = None;
+    for status in statuses {
+        if status.code != 0 {
+            failures += 1;
+            if first_error.is_none() {
+                first_error = Some(format!(
+                    "write failed (code {}): {}",
+                    status.code, status.message
+                ));
+            }
+        }
+    }
+    (chunk_len.saturating_sub(failures), first_error)
+}
+
 async fn execute_batch_write(
     db: &FirestoreDb,
     collection: &CollectionSpec,
@@ -545,7 +573,7 @@ async fn execute_batch_write(
         .collect::<Vec<_>>();
 
     let mut affected = 0u64;
-    let mut first_error: Option<FireqlError> = None;
+    let mut first_error: Option<String> = None;
 
     let mut stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
@@ -575,28 +603,33 @@ async fn execute_batch_write(
                     }
                 }
             }
-            batch.write().await?;
-            Ok::<usize, FireqlError>(chunk.len())
+            let response = batch.write().await?;
+            Ok::<(usize, Option<String>), FireqlError>(count_batch_outcome(
+                &response.statuses,
+                chunk.len(),
+            ))
         }
     }))
     .buffer_unordered(batch_parallelism);
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(count) => affected += count as u64,
+            Ok((count, write_error)) => {
+                affected += count as u64;
+                if first_error.is_none() {
+                    first_error = write_error;
+                }
+            }
             Err(err) => {
                 if first_error.is_none() {
-                    first_error = Some(err);
+                    first_error = Some(err.to_string());
                 }
             }
         }
     }
 
-    if let Some(err) = first_error {
-        return Err(FireqlError::PartialFailure {
-            affected,
-            error: err.to_string(),
-        });
+    if let Some(error) = first_error {
+        return Err(FireqlError::PartialFailure { affected, error });
     }
 
     Ok(FireqlOutput::Affected { affected })
@@ -923,5 +956,36 @@ mod tests {
         let join = join_spec("__name__", "order_id", Some("o"));
         let err = effective_left_join_field(&join, true, "u").unwrap_err();
         assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    fn status(code: i32, message: &str) -> Status {
+        Status {
+            code,
+            message: message.to_string(),
+            details: vec![],
+        }
+    }
+
+    #[test]
+    fn batch_outcome_all_success() {
+        let statuses = vec![status(0, ""), status(0, ""), status(0, "")];
+        let (succeeded, err) = count_batch_outcome(&statuses, 3);
+        assert_eq!(succeeded, 3);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn batch_outcome_partial_failure_counts_only_success() {
+        let statuses = vec![status(0, ""), status(6, "already exists"), status(0, "")];
+        let (succeeded, err) = count_batch_outcome(&statuses, 3);
+        assert_eq!(succeeded, 2);
+        assert!(err.unwrap().contains("already exists"));
+    }
+
+    #[test]
+    fn batch_outcome_empty_statuses_assumes_success() {
+        let (succeeded, err) = count_batch_outcome(&[], 5);
+        assert_eq!(succeeded, 5);
+        assert!(err.is_none());
     }
 }
