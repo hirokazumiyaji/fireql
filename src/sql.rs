@@ -240,7 +240,7 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
         }
         Statement::Insert(insert) => parse_insert_select(insert, None),
         other => Err(FireqlError::Unsupported(format!(
-            "Unsupported statement: {other:?}"
+            "Unsupported statement: {other}"
         ))),
     }
 }
@@ -593,7 +593,7 @@ fn parse_query(query: Query) -> Result<StatementAst> {
     match *query.body {
         SetExpr::Select(select) => parse_select(*select, order_by_exprs, limit_expr),
         other => Err(FireqlError::Unsupported(format!(
-            "Only SELECT is supported in queries. Found: {other:?}"
+            "Only SELECT is supported in queries. Found: {other}"
         ))),
     }
 }
@@ -784,7 +784,7 @@ fn parse_table_factor_with_alias(factor: &TableFactor) -> Result<(CollectionSpec
             Ok((collection, alias_str))
         }
         other => Err(FireqlError::Unsupported(format!(
-            "Unsupported FROM source: {other:?}"
+            "Unsupported FROM source: {other}"
         ))),
     }
 }
@@ -823,29 +823,30 @@ fn parse_table_factor(factor: &TableFactor) -> Result<CollectionSpec> {
     parse_table_factor_with_alias(factor).map(|(spec, _)| spec)
 }
 
-fn parse_collection_group_args(args: &[FunctionArg]) -> Result<CollectionSpec> {
+/// Extracts the single string argument of `collection()` / `collection_group()`,
+/// accepting either a string literal (`'posts'`) or a bare identifier (`posts`).
+fn collection_function_arg(args: &[FunctionArg], context: &str) -> Result<String> {
     if args.len() != 1 {
-        return Err(FireqlError::Unsupported(
-            "collection_group() expects exactly one argument".to_string(),
-        ));
+        return Err(FireqlError::Unsupported(format!(
+            "{context} expects exactly one argument"
+        )));
     }
-
-    let collection_id = match &args[0] {
+    match &args[0] {
         FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => match expr {
-            Expr::Value(_) => expr_to_string_literal(expr, "collection_group()")?,
-            Expr::Identifier(ident) => ident.value.clone(),
-            other => {
-                return Err(FireqlError::Unsupported(format!(
-                    "collection_group() expects a string literal or identifier, got: {other:?}"
-                )))
-            }
+            Expr::Value(_) => expr_to_string_literal(expr, context),
+            Expr::Identifier(ident) => Ok(ident.value.clone()),
+            other => Err(FireqlError::Unsupported(format!(
+                "{context} expects a string literal or identifier, got: {other}"
+            ))),
         },
-        _ => {
-            return Err(FireqlError::Unsupported(
-                "collection_group() expects a single unnamed argument".to_string(),
-            ))
-        }
-    };
+        _ => Err(FireqlError::Unsupported(format!(
+            "{context} expects a single unnamed argument"
+        ))),
+    }
+}
+
+fn parse_collection_group_args(args: &[FunctionArg]) -> Result<CollectionSpec> {
+    let collection_id = collection_function_arg(args, "collection_group()")?;
     Ok(CollectionSpec {
         collection_id,
         parent_path: None,
@@ -871,21 +872,7 @@ pub fn parse_collection_relative_path(raw: &str) -> Result<(String, Option<Strin
 }
 
 fn parse_collection_args(args: &[FunctionArg]) -> Result<CollectionSpec> {
-    if args.len() != 1 {
-        return Err(FireqlError::Unsupported(
-            "collection() expects exactly one argument".to_string(),
-        ));
-    }
-    let raw = match &args[0] {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => {
-            expr_to_string_literal(expr, "collection()")?
-        }
-        _ => {
-            return Err(FireqlError::Unsupported(
-                "collection() expects a single unnamed argument".to_string(),
-            ))
-        }
-    };
+    let raw = collection_function_arg(args, "collection()")?;
     let (collection_id, parent_path) = parse_collection_relative_path(&raw)?;
     Ok(CollectionSpec {
         collection_id,
@@ -1172,7 +1159,7 @@ fn parse_filter_expr(expr: &Expr) -> Result<FilterExpr> {
                     Ok(FilterExpr::Compare { field, op, value })
                 }
                 _ => Err(FireqlError::Unsupported(format!(
-                    "Unsupported binary operator: {op:?}"
+                    "Unsupported binary operator: {op}"
                 ))),
             }
         }
@@ -1208,7 +1195,7 @@ fn parse_filter_expr(expr: &Expr) -> Result<FilterExpr> {
         }
         Expr::Nested(expr) => parse_filter_expr(expr),
         other => Err(FireqlError::Unsupported(format!(
-            "Unsupported WHERE expression: {other:?}"
+            "Unsupported WHERE expression: {other}"
         ))),
     }
 }
@@ -1320,7 +1307,7 @@ fn parse_field_expr(expr: &Expr) -> Result<String> {
             .collect::<Vec<_>>()
             .join(".")),
         other => Err(FireqlError::Unsupported(format!(
-            "Unsupported field expression: {other:?}"
+            "Unsupported field expression: {other}"
         ))),
     }
 }
@@ -1337,7 +1324,7 @@ fn parse_value_expr(expr: &Expr) -> Result<JsonValue> {
                 ))
             } else {
                 Err(FireqlError::Unsupported(format!(
-                    "Unsupported identifier in value expression: {ident:?}"
+                    "Unsupported identifier in value expression: {ident}"
                 )))
             }
         }
@@ -1361,7 +1348,7 @@ fn parse_value_expr(expr: &Expr) -> Result<JsonValue> {
             )),
         },
         other => Err(FireqlError::Unsupported(format!(
-            "Unsupported value expression: {other:?}"
+            "Unsupported value expression: {other}"
         ))),
     }
 }
@@ -1416,7 +1403,7 @@ fn parse_value(value: &Value) -> Result<JsonValue> {
         Value::Boolean(b) => Ok(JsonValue::Bool(*b)),
         Value::Null => Ok(JsonValue::Null),
         other => Err(FireqlError::Unsupported(format!(
-            "Unsupported literal: {other:?}"
+            "Unsupported literal: {other}"
         ))),
     }
 }
@@ -1544,6 +1531,31 @@ mod tests {
             }
             _ => panic!("expected select"),
         }
+    }
+
+    #[test]
+    fn parse_collection_bare_identifier() {
+        let stmt = parse_sql("SELECT * FROM collection(posts) WHERE draft = false").unwrap();
+        match stmt {
+            StatementAst::Select(select) => {
+                assert_eq!(select.collection.collection_id, "posts");
+                assert!(select.collection.parent_path.is_none());
+                assert!(!select.collection.is_group);
+            }
+            _ => panic!("expected select"),
+        }
+    }
+
+    #[test]
+    fn unsupported_query_error_is_concise_sql() {
+        let err = parse_sql("SELECT * FROM users WHERE a BETWEEN 1 AND 5").unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("a BETWEEN 1 AND 5"), "got: {msg}");
+        assert!(!msg.contains("Span"), "error leaks AST debug noise: {msg}");
+        assert!(
+            !msg.contains("Location"),
+            "error leaks AST debug noise: {msg}"
+        );
     }
 
     #[test]
