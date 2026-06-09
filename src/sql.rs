@@ -364,7 +364,7 @@ fn parse_insert_select(
     collection_override: Option<CollectionSpec>,
 ) -> Result<StatementAst> {
     if !insert.into
-        || insert.optimizer_hint.is_some()
+        || !insert.optimizer_hints.is_empty()
         || insert.or.is_some()
         || insert.ignore
         || insert.table_alias.is_some()
@@ -424,8 +424,8 @@ fn parse_insert_select(
         Some(
             insert
                 .columns
-                .into_iter()
-                .map(|c| c.value)
+                .iter()
+                .map(object_name_to_string)
                 .collect::<Vec<_>>(),
         )
     };
@@ -451,6 +451,9 @@ fn parse_insert_target(target: &TableObject) -> Result<CollectionSpec> {
             let args = extract_function_arg_list(&function.args)?;
             parse_collection_args(args)
         }
+        TableObject::TableQuery(_) => Err(FireqlError::Unsupported(
+            "INSERT target sub-query is not supported".to_string(),
+        )),
     }
 }
 
@@ -614,7 +617,7 @@ fn parse_select(
         (select.prewhere.is_some(), "PREWHERE"),
         (select.into.is_some(), "SELECT INTO"),
         (select.exclude.is_some(), "EXCLUDE"),
-        (select.optimizer_hint.is_some(), "optimizer hints"),
+        (!select.optimizer_hints.is_empty(), "optimizer hints"),
         (select.select_modifiers.is_some(), "SELECT modifiers"),
         (select.value_table_mode.is_some(), "SELECT AS STRUCT/VALUE"),
         (!select.lateral_views.is_empty(), "LATERAL VIEW"),
@@ -969,6 +972,11 @@ fn parse_projection(items: &[SelectItem]) -> Result<SelectProjection> {
                         "SELECT field alias is not supported".to_string(),
                     ));
                 }
+            }
+            SelectItem::ExprWithAliases { .. } => {
+                return Err(FireqlError::Unsupported(
+                    "SELECT field alias is not supported".to_string(),
+                ));
             }
         }
     }
