@@ -145,6 +145,22 @@ match output {
 
 `__name__` を destination column に含めた場合は元 document ID を使います。含めない場合は新しい document ID が生成されます。`VALUES` / `UPSERT` / 集約 / JOIN / `collection_group()` source は未対応です。
 
+### JOIN
+
+- `INNER JOIN` / `LEFT JOIN` に対応
+- 結合条件は等値（`=`）のみ。`ON left.field = right.field` の形式で、`__name__`（document ID）も結合キーに使えます
+- 複数の JOIN を連結できます
+- 結合は **クライアント側** で実行されます。左側のクエリ結果から結合キーを集め、右側を `IN`（最大 10 件ずつ分割）で取得してハッシュ結合します
+- 出力フィールドはテーブル別名（または collection ID）で接頭辞が付きます（例: `users.name`, `orders.amount`）
+
+```sql
+SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id;
+SELECT * FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
+SELECT u.name, d.dept_name FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
+```
+
+結合キーに使えるのは string / integer / boolean / document ID のみです。NULL 値は結合対象になりません。
+
 ## 4. WHERE で使える演算子 / 値関数
 
 - 比較: `=`, `!=`, `<`, `<=`, `>`, `>=`
@@ -234,6 +250,8 @@ SELECT AVG(score) FROM users WHERE active = true;
 - `array_contains_any` は `IN` / `NOT IN` と併用不可
 - `array_contains_any` の要素数は最大 10 件
 - 集約は通常フィールドと混在不可（`SELECT name, COUNT(*)` は不可）
+- `JOIN` は `INNER` / `LEFT` のみ、結合条件は等値のみ
+- `JOIN` と `ORDER BY` / `LIMIT` / 集約は併用不可
 
 ## 8. Emulator テスト
 
