@@ -244,11 +244,11 @@ SELECT AVG(score) FROM users WHERE active = true;
 - `INSERT SELECT` の source は通常 collection または `collection('...')` のみ対応
 - `INSERT SELECT` は `VALUES` / `UPSERT` / 集約 / JOIN / `collection_group()` source 非対応
 - 不等号（`<`, `<=`, `>`, `>=`, `!=`, `NOT IN`）がある場合、最初の `ORDER BY` が同じフィールドである必要がある
-- `IN` / `NOT IN` は最大 10 件まで
+- `IN` は最大 30 件、`NOT IN` は最大 10 件まで
 - `NOT IN` は `IN` / `!=` と併用不可
 - `array_contains` / `array_contains_any` は同時に1つまで
 - `array_contains_any` は `IN` / `NOT IN` と併用不可
-- `array_contains_any` の要素数は最大 10 件
+- `array_contains_any` の要素数は最大 30 件
 - 集約は通常フィールドと混在不可（`SELECT name, COUNT(*)` は不可）
 - `JOIN` は `INNER` / `LEFT` のみ、結合条件は等値のみ
 - `JOIN` と `ORDER BY` / `LIMIT` / 集約は併用不可

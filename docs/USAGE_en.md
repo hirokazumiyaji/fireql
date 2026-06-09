@@ -244,11 +244,11 @@ SELECT AVG(score) FROM users WHERE active = true;
 - `INSERT SELECT` sources must be normal collections or `collection('...')`
 - `INSERT SELECT` does not support `VALUES`, `UPSERT`, aggregation, JOIN, or `collection_group()` sources
 - When using inequality operators (`<`, `<=`, `>`, `>=`, `!=`, `NOT IN`), the first `ORDER BY` field must match the inequality field
-- `IN` / `NOT IN` support up to 10 values
+- `IN` supports up to 30 values, `NOT IN` up to 10
 - `NOT IN` cannot be combined with `IN` or `!=`
 - Only one `array_contains` / `array_contains_any` filter at a time
 - `array_contains_any` cannot be combined with `IN` / `NOT IN`
-- `array_contains_any` supports up to 10 values
+- `array_contains_any` supports up to 30 values
 - Aggregations cannot be mixed with regular fields (`SELECT name, COUNT(*)` is not allowed)
 - `JOIN` supports `INNER` / `LEFT` only, with equality join conditions only
 - `JOIN` cannot be combined with `ORDER BY` / `LIMIT` / aggregation

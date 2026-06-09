@@ -16,6 +16,12 @@ use serde::Serialize;
 use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
 
+// Firestore disjunction value limits. `in` and `array-contains-any` allow 30,
+// but `not-in` is stricter at 10.
+const MAX_IN_VALUES: usize = 30;
+const MAX_NOT_IN_VALUES: usize = 10;
+const MAX_ARRAY_CONTAINS_ANY_VALUES: usize = 30;
+
 pub fn build_query_params(
     collection: &CollectionSpec,
     filter: Option<&FilterExpr>,
@@ -160,10 +166,10 @@ fn validate_query_constraints(filter: Option<&FilterExpr>, order_by: &[OrderBy])
             "IN requires at least one value".to_string(),
         ));
     }
-    if stats.in_lengths.iter().any(|len| *len > 10) {
-        return Err(FireqlError::InvalidQuery(
-            "IN supports up to 10 values".to_string(),
-        ));
+    if stats.in_lengths.iter().any(|len| *len > MAX_IN_VALUES) {
+        return Err(FireqlError::InvalidQuery(format!(
+            "IN supports up to {MAX_IN_VALUES} values"
+        )));
     }
     if stats.not_in_fields.len() > 1 {
         return Err(FireqlError::InvalidQuery(
@@ -175,10 +181,14 @@ fn validate_query_constraints(filter: Option<&FilterExpr>, order_by: &[OrderBy])
             "NOT IN requires at least one value".to_string(),
         ));
     }
-    if stats.not_in_lengths.iter().any(|len| *len > 10) {
-        return Err(FireqlError::InvalidQuery(
-            "NOT IN supports up to 10 values".to_string(),
-        ));
+    if stats
+        .not_in_lengths
+        .iter()
+        .any(|len| *len > MAX_NOT_IN_VALUES)
+    {
+        return Err(FireqlError::InvalidQuery(format!(
+            "NOT IN supports up to {MAX_NOT_IN_VALUES} values"
+        )));
     }
     if stats.not_eq_fields.len() > 1 {
         return Err(FireqlError::InvalidQuery(
@@ -218,10 +228,14 @@ fn validate_query_constraints(filter: Option<&FilterExpr>, order_by: &[OrderBy])
             "array-contains-any requires at least one value".to_string(),
         ));
     }
-    if stats.array_contains_any_lengths.iter().any(|len| *len > 10) {
-        return Err(FireqlError::InvalidQuery(
-            "array-contains-any supports up to 10 values".to_string(),
-        ));
+    if stats
+        .array_contains_any_lengths
+        .iter()
+        .any(|len| *len > MAX_ARRAY_CONTAINS_ANY_VALUES)
+    {
+        return Err(FireqlError::InvalidQuery(format!(
+            "array-contains-any supports up to {MAX_ARRAY_CONTAINS_ANY_VALUES} values"
+        )));
     }
 
     Ok(())
@@ -567,12 +581,45 @@ mod tests {
     fn in_values_limit() {
         let filter = FilterExpr::InList {
             field: "age".to_string(),
-            values: (0..11).map(JsonValue::from).collect(),
+            values: (0..31).map(JsonValue::from).collect(),
             negated: false,
         };
         let err =
             build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
+    }
+
+    #[test]
+    fn in_allows_up_to_thirty_values() {
+        let filter = FilterExpr::InList {
+            field: "age".to_string(),
+            values: (0..30).map(JsonValue::from).collect(),
+            negated: false,
+        };
+        let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn not_in_still_limited_to_ten_values() {
+        let filter = FilterExpr::InList {
+            field: "age".to_string(),
+            values: (0..11).map(JsonValue::from).collect(),
+            negated: true,
+        };
+        let err =
+            build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
+        assert!(matches!(err, FireqlError::InvalidQuery(_)));
+    }
+
+    #[test]
+    fn array_contains_any_allows_up_to_thirty_values() {
+        let filter = FilterExpr::ArrayContainsAny {
+            field: "tags".to_string(),
+            values: (0..30).map(JsonValue::from).collect(),
+        };
+        let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
+        assert!(result.is_ok());
     }
 
     #[test]
