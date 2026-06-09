@@ -20,7 +20,7 @@ use gcloud_sdk::google::firestore::v1::{
     document_transform, precondition, write, Document, DocumentMask, Precondition, Write,
 };
 use gcloud_sdk::google::rpc::Status;
-use rand::{distributions::Alphanumeric, Rng};
+use rand::distr::{Alphanumeric, SampleString};
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 
@@ -515,11 +515,7 @@ fn build_insert_select_parts(
 }
 
 fn generate_document_id() -> String {
-    rand::thread_rng()
-        .sample_iter(&Alphanumeric)
-        .take(20)
-        .map(char::from)
-        .collect()
+    Alphanumeric.sample_string(&mut rand::rng(), 20)
 }
 
 /// The Firestore `BatchWrite` RPC is non-atomic: it returns `Ok` even when
