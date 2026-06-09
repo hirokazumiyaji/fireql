@@ -145,6 +145,22 @@ match output {
 
 When `__name__` appears in the destination columns, the source document ID is reused. Without `__name__`, new document IDs are generated. `VALUES`, `UPSERT`, aggregation, JOIN, and `collection_group()` sources are not supported.
 
+### JOIN
+
+- `INNER JOIN` / `LEFT JOIN` are supported
+- Join conditions must be equality (`=`) only, in the form `ON left.field = right.field`; `__name__` (document ID) can be used as a join key
+- Multiple JOINs can be chained
+- Joins run **client-side**: join keys are collected from the left query result, the right side is fetched via `IN` (chunked into groups of 10), and the rows are hash-joined
+- Output fields are prefixed with the table alias (or collection ID), e.g. `users.name`, `orders.amount`
+
+```sql
+SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id;
+SELECT * FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
+SELECT u.name, d.dept_name FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
+```
+
+Only string / integer / boolean / document ID values can be used as join keys. NULL values never match.
+
 ## 4. WHERE Operators / Value Functions
 
 - Comparison: `=`, `!=`, `<`, `<=`, `>`, `>=`
@@ -234,6 +250,8 @@ SELECT AVG(score) FROM users WHERE active = true;
 - `array_contains_any` cannot be combined with `IN` / `NOT IN`
 - `array_contains_any` supports up to 10 values
 - Aggregations cannot be mixed with regular fields (`SELECT name, COUNT(*)` is not allowed)
+- `JOIN` supports `INNER` / `LEFT` only, with equality join conditions only
+- `JOIN` cannot be combined with `ORDER BY` / `LIMIT` / aggregation
 
 ## 8. Emulator Tests
 

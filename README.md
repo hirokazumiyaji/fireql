@@ -9,6 +9,7 @@ Firestore を SQL で操作する Rust 製 CLI / ライブラリです。
 - `SELECT ... FROM <collection>` / `FROM collection('path')` / `FROM collection_group('name')`
 - `WHERE`（AND / OR / 比較 / IN / IS NULL / array_contains / array_contains_any / ref / timestamp / CURRENT_TIMESTAMP）
 - 集約: `COUNT`, `SUM`, `AVG`
+- `INNER JOIN` / `LEFT JOIN`（等値条件のみ。クライアント側で結合）
 - `ORDER BY` / `LIMIT`
 - `INSERT INTO ... SELECT ...`
 - `UPDATE ... SET ... WHERE ...`
@@ -27,6 +28,8 @@ SELECT * FROM users WHERE created_at >= timestamp('2024-01-01T00:00:00Z');
 SELECT * FROM users WHERE created_at >= CURRENT_TIMESTAMP;
 SELECT COUNT(*) FROM users WHERE active = true;
 SELECT SUM(score) AS total FROM users WHERE active = true;
+SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id;
+SELECT * FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
 INSERT INTO archived_users SELECT * FROM users WHERE disabled = true;
 INSERT INTO archived_users (__name__, name) SELECT __name__, name FROM users WHERE disabled = true;
 UPDATE users SET status = 'active', updated_at = CURRENT_TIMESTAMP WHERE last_login < '2024-01-01';
