@@ -669,6 +669,18 @@ fn parse_select(
         ));
     }
 
+    if let (Some(joins), Some(filter)) = (&joins, &filter) {
+        let right_names: Vec<&str> = joins
+            .iter()
+            .map(|j| {
+                j.right_alias
+                    .as_deref()
+                    .unwrap_or(j.collection.collection_id.as_str())
+            })
+            .collect();
+        validate_join_filter_aliases(filter, &right_names)?;
+    }
+
     Ok(StatementAst::Select(SelectStatement {
         collection,
         alias,
@@ -678,6 +690,36 @@ fn parse_select(
         limit,
         joins,
     }))
+}
+
+/// In a JOIN query the WHERE filter is pushed to the left (FROM) collection
+/// query only, so a field qualified by a joined table's alias (e.g. `o.amount`)
+/// would otherwise be sent to Firestore as a left-side map path and silently
+/// match nothing. Reject those up front. Unqualified or left-qualified fields,
+/// and nested map paths (whose prefix is not a join alias), are left untouched.
+fn validate_join_filter_aliases(filter: &FilterExpr, right_names: &[&str]) -> Result<()> {
+    match filter {
+        FilterExpr::Compare { field, .. }
+        | FilterExpr::ArrayContains { field, .. }
+        | FilterExpr::ArrayContainsAny { field, .. }
+        | FilterExpr::InList { field, .. }
+        | FilterExpr::Unary { field, .. } => {
+            if let Some((prefix, _)) = field.split_once('.') {
+                if right_names.contains(&prefix) {
+                    return Err(FireqlError::Unsupported(format!(
+                        "WHERE cannot reference the joined table `{prefix}`; filters apply to the left (FROM) table only"
+                    )));
+                }
+            }
+            Ok(())
+        }
+        FilterExpr::And(filters) | FilterExpr::Or(filters) => {
+            for f in filters {
+                validate_join_filter_aliases(f, right_names)?;
+            }
+            Ok(())
+        }
+    }
 }
 
 fn parse_table_with_joins(table: &TableWithJoins) -> Result<CollectionSpec> {
@@ -2107,6 +2149,28 @@ mod tests {
         let sql = "SELECT * FROM users u INNER JOIN orders o ON u.id = o.user_id LIMIT 10";
         let err = parse_sql(sql).unwrap_err();
         assert!(err.to_string().contains("LIMIT is not supported with JOIN"));
+    }
+
+    #[test]
+    fn join_where_referencing_right_alias_is_rejected() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id \
+                   WHERE o.amount > 100";
+        let err = parse_sql(sql).unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)), "got: {err:?}");
+    }
+
+    #[test]
+    fn join_where_referencing_left_alias_is_allowed() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id \
+                   WHERE u.active = true";
+        assert!(parse_sql(sql).is_ok());
+    }
+
+    #[test]
+    fn join_where_nested_field_is_allowed() {
+        let sql = "SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id \
+                   WHERE profile.age > 18";
+        assert!(parse_sql(sql).is_ok());
     }
 
     #[test]

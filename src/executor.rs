@@ -19,6 +19,7 @@ use futures::stream::{self, StreamExt};
 use gcloud_sdk::google::firestore::v1::{
     document_transform, precondition, write, Document, DocumentMask, Precondition, Write,
 };
+use gcloud_sdk::google::rpc::Status;
 use rand::{distributions::Alphanumeric, Rng};
 use serde_json::Value as JsonValue;
 use std::collections::HashSet;
@@ -171,6 +172,30 @@ fn strip_alias_from_filter(filter: &FilterExpr, alias: &str) -> FilterExpr {
     }
 }
 
+/// Resolves the left-side join key for a join step against `current_result`.
+///
+/// `__name__` always resolves to the leading table's `DocOutput.id`, which is
+/// preserved across every join, so it must stay unqualified even on chained
+/// joins. Regular fields, by contrast, are prefixed with their alias on chained
+/// joins because the left rows are already prefixed (e.g. `u.dept_id`).
+/// A previous right table's `__name__` cannot be used: that id is never retained.
+fn effective_left_join_field(join: &JoinSpec, is_joined: bool, left_alias: &str) -> Result<String> {
+    if join.left_field == "__name__" {
+        let qualifier = join.left_alias.as_deref().unwrap_or(left_alias);
+        if is_joined && qualifier != left_alias {
+            return Err(FireqlError::Unsupported(format!(
+                "JOIN on `{qualifier}.__name__` is not supported; only the leading table's document id can be used as a join key"
+            )));
+        }
+        Ok("__name__".to_string())
+    } else if is_joined {
+        let alias = join.left_alias.as_deref().unwrap_or(left_alias);
+        Ok(format!("{alias}.{}", join.left_field))
+    } else {
+        Ok(join.left_field.clone())
+    }
+}
+
 async fn execute_join_select(
     db: &FirestoreDb,
     stmt: &crate::sql::SelectStatement,
@@ -199,12 +224,7 @@ async fn execute_join_select(
     let mut is_joined = false;
 
     for join in joins {
-        let effective_left_field = if is_joined {
-            let alias = join.left_alias.as_deref().unwrap_or(left_alias);
-            format!("{alias}.{}", join.left_field)
-        } else {
-            join.left_field.clone()
-        };
+        let effective_left_field = effective_left_join_field(join, is_joined, left_alias)?;
 
         let keys = extract_join_keys(&current_result, &effective_left_field)
             .map_err(FireqlError::Unsupported)?;
@@ -350,7 +370,7 @@ async fn execute_insert_select(
         .map(|chunk| chunk.to_vec())
         .collect::<Vec<_>>();
     let mut affected = 0u64;
-    let mut first_error: Option<FireqlError> = None;
+    let mut first_error: Option<String> = None;
 
     let mut stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
@@ -377,28 +397,33 @@ async fn execute_insert_select(
                 }))?;
             }
 
-            batch.write().await?;
-            Ok::<usize, FireqlError>(chunk.len())
+            let response = batch.write().await?;
+            Ok::<(usize, Option<String>), FireqlError>(count_batch_outcome(
+                &response.statuses,
+                chunk.len(),
+            ))
         }
     }))
     .buffer_unordered(batch_parallelism);
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(count) => affected += count as u64,
+            Ok((count, write_error)) => {
+                affected += count as u64;
+                if first_error.is_none() {
+                    first_error = write_error;
+                }
+            }
             Err(err) => {
                 if first_error.is_none() {
-                    first_error = Some(err);
+                    first_error = Some(err.to_string());
                 }
             }
         }
     }
 
-    if let Some(err) = first_error {
-        return Err(FireqlError::PartialFailure {
-            affected,
-            error: err.to_string(),
-        });
+    if let Some(error) = first_error {
+        return Err(FireqlError::PartialFailure { affected, error });
     }
 
     Ok(FireqlOutput::Affected { affected })
@@ -497,6 +522,28 @@ fn generate_document_id() -> String {
         .collect()
 }
 
+/// The Firestore `BatchWrite` RPC is non-atomic: it returns `Ok` even when
+/// individual writes fail, reporting each result in `statuses` (code 0 = OK).
+/// Count only the writes that actually succeeded and surface the first failure,
+/// so e.g. an INSERT colliding with an existing id (FAILED_PRECONDITION) is not
+/// silently reported as affected.
+fn count_batch_outcome(statuses: &[Status], chunk_len: usize) -> (usize, Option<String>) {
+    let mut failures = 0usize;
+    let mut first_error = None;
+    for status in statuses {
+        if status.code != 0 {
+            failures += 1;
+            if first_error.is_none() {
+                first_error = Some(format!(
+                    "write failed (code {}): {}",
+                    status.code, status.message
+                ));
+            }
+        }
+    }
+    (chunk_len.saturating_sub(failures), first_error)
+}
+
 async fn execute_batch_write(
     db: &FirestoreDb,
     collection: &CollectionSpec,
@@ -526,7 +573,7 @@ async fn execute_batch_write(
         .collect::<Vec<_>>();
 
     let mut affected = 0u64;
-    let mut first_error: Option<FireqlError> = None;
+    let mut first_error: Option<String> = None;
 
     let mut stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
@@ -556,28 +603,33 @@ async fn execute_batch_write(
                     }
                 }
             }
-            batch.write().await?;
-            Ok::<usize, FireqlError>(chunk.len())
+            let response = batch.write().await?;
+            Ok::<(usize, Option<String>), FireqlError>(count_batch_outcome(
+                &response.statuses,
+                chunk.len(),
+            ))
         }
     }))
     .buffer_unordered(batch_parallelism);
 
     while let Some(result) = stream.next().await {
         match result {
-            Ok(count) => affected += count as u64,
+            Ok((count, write_error)) => {
+                affected += count as u64;
+                if first_error.is_none() {
+                    first_error = write_error;
+                }
+            }
             Err(err) => {
                 if first_error.is_none() {
-                    first_error = Some(err);
+                    first_error = Some(err.to_string());
                 }
             }
         }
     }
 
-    if let Some(err) = first_error {
-        return Err(FireqlError::PartialFailure {
-            affected,
-            error: err.to_string(),
-        });
+    if let Some(error) = first_error {
+        return Err(FireqlError::PartialFailure { affected, error });
     }
 
     Ok(FireqlOutput::Affected { affected })
@@ -850,5 +902,90 @@ mod tests {
             parts.fields[0].1.value.value_type,
             Some(ValueType::StringValue("Alice".into()))
         );
+    }
+
+    fn join_spec(left_field: &str, right_field: &str, left_alias: Option<&str>) -> JoinSpec {
+        JoinSpec {
+            join_type: crate::sql::JoinType::Inner,
+            collection: CollectionSpec {
+                collection_id: "right".to_string(),
+                parent_path: None,
+                is_group: false,
+            },
+            left_field: left_field.to_string(),
+            right_field: right_field.to_string(),
+            left_alias: left_alias.map(|s| s.to_string()),
+            right_alias: None,
+        }
+    }
+
+    #[test]
+    fn effective_left_field_first_join_uses_field_as_is() {
+        let name_join = join_spec("__name__", "user_id", Some("u"));
+        assert_eq!(
+            effective_left_join_field(&name_join, false, "u").unwrap(),
+            "__name__"
+        );
+        let field_join = join_spec("dept_id", "__name__", Some("u"));
+        assert_eq!(
+            effective_left_join_field(&field_join, false, "u").unwrap(),
+            "dept_id"
+        );
+    }
+
+    #[test]
+    fn effective_left_field_chained_name_resolves_to_leading_id() {
+        let join = join_spec("__name__", "user_id", Some("u"));
+        assert_eq!(
+            effective_left_join_field(&join, true, "u").unwrap(),
+            "__name__"
+        );
+    }
+
+    #[test]
+    fn effective_left_field_chained_regular_field_is_prefixed() {
+        let join = join_spec("dept_id", "__name__", Some("u"));
+        assert_eq!(
+            effective_left_join_field(&join, true, "u").unwrap(),
+            "u.dept_id"
+        );
+    }
+
+    #[test]
+    fn effective_left_field_chained_prior_right_name_is_rejected() {
+        let join = join_spec("__name__", "order_id", Some("o"));
+        let err = effective_left_join_field(&join, true, "u").unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    fn status(code: i32, message: &str) -> Status {
+        Status {
+            code,
+            message: message.to_string(),
+            details: vec![],
+        }
+    }
+
+    #[test]
+    fn batch_outcome_all_success() {
+        let statuses = vec![status(0, ""), status(0, ""), status(0, "")];
+        let (succeeded, err) = count_batch_outcome(&statuses, 3);
+        assert_eq!(succeeded, 3);
+        assert!(err.is_none());
+    }
+
+    #[test]
+    fn batch_outcome_partial_failure_counts_only_success() {
+        let statuses = vec![status(0, ""), status(6, "already exists"), status(0, "")];
+        let (succeeded, err) = count_batch_outcome(&statuses, 3);
+        assert_eq!(succeeded, 2);
+        assert!(err.unwrap().contains("already exists"));
+    }
+
+    #[test]
+    fn batch_outcome_empty_statuses_assumes_success() {
+        let (succeeded, err) = count_batch_outcome(&[], 5);
+        assert_eq!(succeeded, 5);
+        assert!(err.is_none());
     }
 }
