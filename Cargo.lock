@@ -697,7 +697,7 @@ checksum = "5baebc0774151f905a1a2cc41989300b1e6fbb29aff0ceffa1064fdd3088d582"
 
 [[package]]
 name = "fireql"
-version = "0.1.1"
+version = "0.2.0"
 dependencies = [
  "async-trait",
  "base64",
@@ -868,9 +868,9 @@ dependencies = [
 
 [[package]]
 name = "gcloud-sdk"
-version = "0.30.0"
+version = "0.30.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "17309d7c99b2fe6610de4c0840441901e33bfc43f4414be3889aa75763147187"
+checksum = "0cde1dbca3fcfdb4757fb4e50004ceb10ff97a4c839352e7ceec70acf6cf7c33"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2141,9 +2141,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.41"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
 dependencies = [
  "aws-lc-rs",
  "log",
