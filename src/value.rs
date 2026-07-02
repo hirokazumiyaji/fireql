@@ -20,41 +20,41 @@ pub enum FireqlValue {
 }
 
 impl FireqlValue {
-    pub(crate) fn from_proto(value: &Value) -> Self {
-        match &value.value_type {
+    pub(crate) fn from_proto(value: Value) -> Self {
+        match value.value_type {
             None | Some(ValueType::NullValue(_)) => Self::Null,
-            Some(ValueType::BooleanValue(b)) => Self::Boolean(*b),
-            Some(ValueType::IntegerValue(i)) => Self::Integer(*i),
-            Some(ValueType::DoubleValue(d)) => Self::Double(*d),
+            Some(ValueType::BooleanValue(b)) => Self::Boolean(b),
+            Some(ValueType::IntegerValue(i)) => Self::Integer(i),
+            Some(ValueType::DoubleValue(d)) => Self::Double(d),
             Some(ValueType::TimestampValue(ts)) => {
                 let dt = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
                     .unwrap_or_default();
                 Self::Timestamp(dt)
             }
-            Some(ValueType::StringValue(s)) => Self::String(s.clone()),
-            Some(ValueType::BytesValue(b)) => Self::Bytes(b.clone()),
-            Some(ValueType::ReferenceValue(r)) => Self::Reference(r.clone()),
+            Some(ValueType::StringValue(s)) => Self::String(s),
+            Some(ValueType::BytesValue(b)) => Self::Bytes(b),
+            Some(ValueType::ReferenceValue(r)) => Self::Reference(r),
             Some(ValueType::GeoPointValue(g)) => Self::GeoPoint {
                 latitude: g.latitude,
                 longitude: g.longitude,
             },
             Some(ValueType::ArrayValue(arr)) => {
-                Self::Array(arr.values.iter().map(Self::from_proto).collect())
+                Self::Array(arr.values.into_iter().map(Self::from_proto).collect())
             }
             Some(ValueType::MapValue(map)) => Self::Map(
                 map.fields
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Self::from_proto(v)))
+                    .into_iter()
+                    .map(|(k, v)| (k, Self::from_proto(v)))
                     .collect(),
             ),
             _ => Self::Null,
         }
     }
 
-    pub(crate) fn from_document_fields(fields: &HashMap<String, Value>) -> HashMap<String, Self> {
+    pub(crate) fn from_document_fields(fields: HashMap<String, Value>) -> HashMap<String, Self> {
         fields
-            .iter()
-            .map(|(k, v)| (k.clone(), Self::from_proto(v)))
+            .into_iter()
+            .map(|(k, v)| (k, Self::from_proto(v)))
             .collect()
     }
 

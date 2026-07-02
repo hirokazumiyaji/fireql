@@ -100,7 +100,7 @@ async fn execute_select(
             )?;
 
             let docs = db.query_doc(params).await?;
-            Ok(FireqlOutput::Rows(docs_to_output(&docs)?))
+            Ok(FireqlOutput::Rows(docs_to_output(docs)?))
         }
         SelectProjection::Aggregations(aggregations) => {
             let params = build_aggregated_query_params(
@@ -115,7 +115,7 @@ async fn execute_select(
             let data = docs
                 .into_iter()
                 .next()
-                .map(|doc| FireqlValue::from_document_fields(&doc.fields))
+                .map(|doc| FireqlValue::from_document_fields(doc.fields))
                 .unwrap_or_default();
             Ok(FireqlOutput::Aggregation(data))
         }
@@ -220,7 +220,7 @@ async fn execute_join_select(
         Some(db.get_documents_path().as_str()),
     )?;
     let left_docs_raw = db.query_doc(left_params).await?;
-    let left_docs = docs_to_output(&left_docs_raw)?;
+    let left_docs = docs_to_output(left_docs_raw)?;
 
     let mut current_result = left_docs;
     let mut is_joined = false;
@@ -282,7 +282,7 @@ async fn execute_join_select(
             )?;
 
             let chunk_docs = db.query_doc(right_params).await?;
-            right_docs.extend(docs_to_output(&chunk_docs)?);
+            right_docs.extend(docs_to_output(chunk_docs)?);
         }
 
         let right_prefix = join
@@ -680,13 +680,15 @@ fn is_current_timestamp_value(value: &JsonValue) -> bool {
     }
 }
 
-fn docs_to_output(docs: &[gcloud_sdk::google::firestore::v1::Document]) -> Result<Vec<DocOutput>> {
-    docs.iter().map(doc_to_output).collect()
+fn docs_to_output(
+    docs: Vec<gcloud_sdk::google::firestore::v1::Document>,
+) -> Result<Vec<DocOutput>> {
+    docs.into_iter().map(doc_to_output).collect()
 }
 
-fn doc_to_output(doc: &gcloud_sdk::google::firestore::v1::Document) -> Result<DocOutput> {
+fn doc_to_output(doc: gcloud_sdk::google::firestore::v1::Document) -> Result<DocOutput> {
     let parts = parse_doc_name(&doc.name)?;
-    let data = FireqlValue::from_document_fields(&doc.fields);
+    let data = FireqlValue::from_document_fields(doc.fields);
 
     Ok(DocOutput {
         id: parts.id,
