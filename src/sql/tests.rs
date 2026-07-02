@@ -751,3 +751,51 @@ fn select_wildcard_with_fields_is_all() {
         _ => panic!("expected select"),
     }
 }
+
+#[test]
+fn delete_using_is_rejected() {
+    let err = parse_sql("DELETE FROM users USING orders WHERE flag = true").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn delete_returning_is_rejected() {
+    let err = parse_sql("DELETE FROM users WHERE flag = true RETURNING id").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn update_from_is_rejected() {
+    let err = parse_sql("UPDATE users SET a = 1 FROM orders WHERE flag = true").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn update_returning_is_rejected() {
+    let err = parse_sql("UPDATE users SET a = 1 WHERE flag = true RETURNING id").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn update_or_conflict_clause_is_rejected() {
+    let err = parse_sql("UPDATE OR IGNORE users SET a = 1 WHERE flag = true").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn select_with_cte_is_rejected() {
+    let err = parse_sql("WITH x AS (SELECT * FROM users) SELECT * FROM x").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn select_fetch_is_rejected() {
+    let err = parse_sql("SELECT * FROM users FETCH FIRST 5 ROWS ONLY").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn select_for_update_is_rejected() {
+    let err = parse_sql("SELECT * FROM users FOR UPDATE").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}

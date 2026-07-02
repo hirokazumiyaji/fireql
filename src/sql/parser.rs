@@ -52,6 +52,18 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
     match stmt {
         Statement::Query(query) => parse_query(*query),
         Statement::Update(update) => {
+            let unsupported: &[(bool, &str)] = &[
+                (!update.optimizer_hints.is_empty(), "optimizer hints"),
+                (update.from.is_some(), "UPDATE ... FROM"),
+                (update.returning.is_some(), "RETURNING"),
+                (update.output.is_some(), "OUTPUT"),
+                (update.or.is_some(), "UPDATE OR ..."),
+            ];
+            if let Some((_, clause)) = unsupported.iter().find(|(present, _)| *present) {
+                return Err(FireqlError::Unsupported(format!(
+                    "{clause} is not supported"
+                )));
+            }
             let collection = parse_table_with_joins(&update.table)?;
             let filter = update
                 .selection
@@ -70,6 +82,18 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
             }))
         }
         Statement::Delete(delete) => {
+            let unsupported: &[(bool, &str)] = &[
+                (!delete.optimizer_hints.is_empty(), "optimizer hints"),
+                (!delete.tables.is_empty(), "Multi-table DELETE"),
+                (delete.using.is_some(), "USING"),
+                (delete.returning.is_some(), "RETURNING"),
+                (delete.output.is_some(), "OUTPUT"),
+            ];
+            if let Some((_, clause)) = unsupported.iter().find(|(present, _)| *present) {
+                return Err(FireqlError::Unsupported(format!(
+                    "{clause} is not supported"
+                )));
+            }
             let from = match delete.from {
                 FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
             };
@@ -115,6 +139,7 @@ pub(super) fn parse_insert_select(
         || !insert.assignments.is_empty()
         || insert.on.is_some()
         || insert.returning.is_some()
+        || insert.output.is_some()
         || insert.replace_into
         || insert.priority.is_some()
         || insert.insert_alias.is_some()
@@ -247,6 +272,24 @@ fn validate_insert_select_projection(
 }
 
 pub(super) fn parse_query(query: Query) -> Result<StatementAst> {
+    // Reject query-shell clauses that sqlparser accepts but fireql does not
+    // translate, so they can never be silently dropped (same principle as the
+    // clause table in parse_select).
+    let unsupported: &[(bool, &str)] = &[
+        (query.with.is_some(), "WITH (CTE)"),
+        (query.fetch.is_some(), "FETCH"),
+        (!query.locks.is_empty(), "FOR UPDATE/FOR SHARE"),
+        (query.for_clause.is_some(), "FOR XML/JSON/BROWSE"),
+        (query.settings.is_some(), "SETTINGS"),
+        (query.format_clause.is_some(), "FORMAT"),
+        (!query.pipe_operators.is_empty(), "Pipe operators"),
+    ];
+    if let Some((_, clause)) = unsupported.iter().find(|(present, _)| *present) {
+        return Err(FireqlError::Unsupported(format!(
+            "{clause} is not supported"
+        )));
+    }
+
     let order_by_exprs = match query.order_by {
         Some(order_by) => match order_by.kind {
             OrderByKind::Expressions(exprs) => exprs,
