@@ -6,6 +6,7 @@ mod tests;
 pub use parser::parse_sql;
 
 use crate::error::{FireqlError, Result};
+use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone)]
@@ -29,9 +30,15 @@ pub enum Projection {
     Fields(Vec<String>),
 }
 
-pub(crate) const FIREQL_REF_KEY: &str = "__fireql_ref";
-pub(crate) const FIREQL_TS_KEY: &str = "__fireql_ts";
-pub(crate) const FIREQL_CURRENT_TS_KEY: &str = "__fireql_current_ts";
+/// SQL 値式の解析結果。Firestore 固有のリテラル(参照・タイムスタンプ)を
+/// JSON センチネルではなく型で表現し、不正状態を表現不能にする。
+#[derive(Debug, Clone, PartialEq)]
+pub enum SqlValue {
+    Literal(JsonValue),
+    Reference(String),
+    Timestamp(DateTime<Utc>),
+    CurrentTimestamp,
+}
 
 #[derive(Debug, Clone)]
 pub enum SelectProjection {
@@ -67,7 +74,7 @@ pub struct SelectStatement {
 #[derive(Debug, Clone)]
 pub struct UpdateStatement {
     pub collection: CollectionSpec,
-    pub assignments: Vec<(String, JsonValue)>,
+    pub assignments: Vec<(String, SqlValue)>,
     pub filter: FilterExpr,
     pub order_by: Vec<OrderBy>,
     pub limit: Option<u32>,
@@ -121,19 +128,19 @@ pub enum FilterExpr {
     Compare {
         field: String,
         op: CompareOp,
-        value: JsonValue,
+        value: SqlValue,
     },
     ArrayContains {
         field: String,
-        value: JsonValue,
+        value: SqlValue,
     },
     ArrayContainsAny {
         field: String,
-        values: Vec<JsonValue>,
+        values: Vec<SqlValue>,
     },
     InList {
         field: String,
-        values: Vec<JsonValue>,
+        values: Vec<SqlValue>,
         negated: bool,
     },
     Unary {

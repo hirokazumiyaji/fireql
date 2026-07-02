@@ -1,12 +1,10 @@
 use crate::error::{FireqlError, Result};
 use crate::joiner::{chunk_keys, extract_join_keys, hash_join, JoinParams};
 use crate::output::{DocOutput, FireqlOutput};
-use crate::planner::{
-    build_aggregated_query_params, build_query_params, json_to_firestore_value_with_context,
-};
+use crate::planner::{build_aggregated_query_params, build_query_params, sql_value_to_firestore};
 use crate::sql::{
     CollectionSpec, FilterExpr, InsertSelectStatement, JoinSpec, OrderBy, Projection,
-    SelectProjection, StatementAst, FIREQL_CURRENT_TS_KEY,
+    SelectProjection, SqlValue, StatementAst,
 };
 use crate::value::FireqlValue;
 
@@ -263,18 +261,21 @@ async fn execute_join_select(
         };
 
         for chunk in chunks {
-            let in_values: Vec<serde_json::Value> = if join.right_field == "__name__" {
+            let in_values: Vec<SqlValue> = if join.right_field == "__name__" {
                 chunk
                     .iter()
                     .map(|k| match k {
                         crate::joiner::JoinKey::String(s) => {
-                            serde_json::Value::String(format!("{doc_path}/{s}"))
+                            SqlValue::Literal(serde_json::Value::String(format!("{doc_path}/{s}")))
                         }
-                        _ => k.to_json_value(),
+                        _ => SqlValue::Literal(k.to_json_value()),
                     })
                     .collect()
             } else {
-                chunk.iter().map(|k| k.to_json_value()).collect()
+                chunk
+                    .iter()
+                    .map(|k| SqlValue::Literal(k.to_json_value()))
+                    .collect()
             };
 
             let in_filter = FilterExpr::InList {
@@ -633,7 +634,7 @@ struct UpdateParts {
 }
 
 fn build_update_parts(
-    assignments: &[(String, JsonValue)],
+    assignments: &[(String, SqlValue)],
     base_doc_path: Option<&str>,
 ) -> Result<UpdateParts> {
     let mut update_mask_fields = Vec::with_capacity(assignments.len());
@@ -641,7 +642,7 @@ fn build_update_parts(
     let mut transforms = Vec::new();
 
     for (field, value) in assignments {
-        if is_current_timestamp_value(value) {
+        if matches!(value, SqlValue::CurrentTimestamp) {
             transforms.push(document_transform::FieldTransform {
                 field_path: field.clone(),
                 transform_type: Some(
@@ -653,7 +654,7 @@ fn build_update_parts(
             continue;
         }
 
-        let fv = json_to_firestore_value_with_context(value, base_doc_path)?;
+        let fv = sql_value_to_firestore(value, base_doc_path)?;
         fields.push((field.clone(), fv));
         update_mask_fields.push(field.clone());
     }
@@ -663,13 +664,6 @@ fn build_update_parts(
         fields,
         transforms,
     })
-}
-
-fn is_current_timestamp_value(value: &JsonValue) -> bool {
-    match value {
-        JsonValue::Object(map) => map.contains_key(FIREQL_CURRENT_TS_KEY),
-        _ => false,
-    }
 }
 
 fn docs_to_output(
@@ -770,14 +764,7 @@ mod tests {
 
     #[test]
     fn update_parts_turn_current_timestamp_into_server_timestamp_transform() {
-        let assignments = vec![(
-            "updated_at".to_string(),
-            JsonValue::Object(
-                [(FIREQL_CURRENT_TS_KEY.to_string(), JsonValue::Bool(true))]
-                    .into_iter()
-                    .collect(),
-            ),
-        )];
+        let assignments = vec![("updated_at".to_string(), SqlValue::CurrentTimestamp)];
 
         let parts = build_update_parts(&assignments, None).expect("parts");
 
@@ -798,16 +785,9 @@ mod tests {
         let assignments = vec![
             (
                 "status".to_string(),
-                JsonValue::String("active".to_string()),
+                SqlValue::Literal(JsonValue::String("active".to_string())),
             ),
-            (
-                "updated_at".to_string(),
-                JsonValue::Object(
-                    [(FIREQL_CURRENT_TS_KEY.to_string(), JsonValue::Bool(true))]
-                        .into_iter()
-                        .collect(),
-                ),
-            ),
+            ("updated_at".to_string(), SqlValue::CurrentTimestamp),
         ];
 
         let parts = build_update_parts(&assignments, None).expect("parts");

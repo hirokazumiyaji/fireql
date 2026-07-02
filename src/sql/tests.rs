@@ -323,7 +323,7 @@ fn parse_array_contains() {
             match filter {
                 FilterExpr::ArrayContains { field, value } => {
                     assert_eq!(field, "tags");
-                    assert_eq!(value, JsonValue::from("a"));
+                    assert_eq!(value, SqlValue::Literal(JsonValue::from("a")));
                 }
                 _ => panic!("expected array_contains filter"),
             }
@@ -358,8 +358,7 @@ fn parse_ref_value() {
             let filter = select.filter.expect("filter");
             match filter {
                 FilterExpr::Compare { value, .. } => {
-                    let obj = value.as_object().expect("object");
-                    assert_eq!(obj.get(FIREQL_REF_KEY).unwrap(), "users/user1");
+                    assert_eq!(value, SqlValue::Reference("users/user1".to_string()));
                 }
                 _ => panic!("expected compare filter"),
             }
@@ -378,8 +377,10 @@ fn parse_timestamp_value() {
             let filter = select.filter.expect("filter");
             match filter {
                 FilterExpr::Compare { value, .. } => {
-                    let obj = value.as_object().expect("object");
-                    assert_eq!(obj.get(FIREQL_TS_KEY).unwrap(), "2024-01-01T00:00:00Z");
+                    let expected = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                        .unwrap()
+                        .with_timezone(&chrono::Utc);
+                    assert_eq!(value, SqlValue::Timestamp(expected));
                 }
                 _ => panic!("expected compare filter"),
             }
@@ -396,11 +397,7 @@ fn parse_current_timestamp_value() {
             let filter = select.filter.expect("filter");
             match filter {
                 FilterExpr::Compare { value, .. } => {
-                    let obj = value.as_object().expect("object");
-                    assert_eq!(
-                        obj.get(FIREQL_CURRENT_TS_KEY).unwrap(),
-                        &JsonValue::Bool(true)
-                    );
+                    assert_eq!(value, SqlValue::CurrentTimestamp);
                 }
                 _ => panic!("expected compare filter"),
             }
@@ -418,11 +415,7 @@ fn parse_update_with_current_timestamp_assignment() {
             assert_eq!(update.assignments.len(), 1);
             let (field, value) = &update.assignments[0];
             assert_eq!(field, "updated_at");
-            let obj = value.as_object().expect("object");
-            assert_eq!(
-                obj.get(FIREQL_CURRENT_TS_KEY).unwrap(),
-                &JsonValue::Bool(true)
-            );
+            assert_eq!(value, &SqlValue::CurrentTimestamp);
         }
         _ => panic!("expected update"),
     }

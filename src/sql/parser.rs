@@ -1,10 +1,10 @@
 use super::{
     AggregationExpr, AggregationFunc, CollectionSpec, CompareOp, DeleteStatement, FilterExpr,
     InsertSelectStatement, JoinSpec, JoinType, OrderBy, OrderDirection, Projection,
-    SelectProjection, SelectStatement, StatementAst, UnaryOp, UpdateStatement,
-    FIREQL_CURRENT_TS_KEY, FIREQL_REF_KEY, FIREQL_TS_KEY,
+    SelectProjection, SelectStatement, SqlValue, StatementAst, UnaryOp, UpdateStatement,
 };
 use crate::error::{FireqlError, Result};
+use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlparser::ast::{
     AssignmentTarget, Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
@@ -13,10 +13,6 @@ use sqlparser::ast::{
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-
-fn sentinel_object(key: &str, value: JsonValue) -> JsonValue {
-    JsonValue::Object([(key.to_string(), value)].into_iter().collect())
-}
 
 fn reject_function_modifiers(function: &sqlparser::ast::Function, context: &str) -> Result<()> {
     let has_distinct = matches!(
@@ -861,7 +857,7 @@ fn parse_limit_expr(expr: &Expr) -> Result<Option<u32>> {
 
 fn parse_assignments(
     assignments: Vec<sqlparser::ast::Assignment>,
-) -> Result<Vec<(String, JsonValue)>> {
+) -> Result<Vec<(String, SqlValue)>> {
     let mut result = Vec::with_capacity(assignments.len());
     for assignment in assignments {
         let field = match &assignment.target {
@@ -1012,7 +1008,7 @@ fn parse_function_args(args: &FunctionArguments) -> Result<Vec<Expr>> {
     Ok(exprs)
 }
 
-fn parse_value_list_expr(expr: &Expr) -> Result<Vec<JsonValue>> {
+fn parse_value_list_expr(expr: &Expr) -> Result<Vec<SqlValue>> {
     match expr {
         Expr::Array(array) => array
             .elem
@@ -1067,16 +1063,13 @@ fn parse_field_expr(expr: &Expr) -> Result<String> {
     }
 }
 
-fn parse_value_expr(expr: &Expr) -> Result<JsonValue> {
+fn parse_value_expr(expr: &Expr) -> Result<SqlValue> {
     match expr {
-        Expr::Value(vws) => parse_value(&vws.value),
+        Expr::Value(vws) => Ok(SqlValue::Literal(parse_value(&vws.value)?)),
         Expr::Function(function) => parse_value_function(function),
         Expr::Identifier(ident) => {
             if ident.value.eq_ignore_ascii_case("current_timestamp") {
-                Ok(sentinel_object(
-                    FIREQL_CURRENT_TS_KEY,
-                    JsonValue::Bool(true),
-                ))
+                Ok(SqlValue::CurrentTimestamp)
             } else {
                 Err(FireqlError::Unsupported(format!(
                     "Unsupported identifier in value expression: {ident}"
@@ -1088,7 +1081,7 @@ fn parse_value_expr(expr: &Expr) -> Result<JsonValue> {
                 Expr::Value(vws) => match &vws.value {
                     Value::Number(num, _) => {
                         let with_sign = format!("-{num}");
-                        parse_numeric(&with_sign)
+                        Ok(SqlValue::Literal(parse_numeric(&with_sign)?))
                     }
                     _ => Err(FireqlError::Unsupported(
                         "Unary minus only supported for numeric literals".to_string(),
@@ -1108,7 +1101,7 @@ fn parse_value_expr(expr: &Expr) -> Result<JsonValue> {
     }
 }
 
-fn parse_value_function(function: &sqlparser::ast::Function) -> Result<JsonValue> {
+fn parse_value_function(function: &sqlparser::ast::Function) -> Result<SqlValue> {
     let name = object_name_to_string(&function.name);
     let name_lower = name.to_ascii_lowercase();
     let args = parse_function_args(&function.args)?;
@@ -1121,7 +1114,7 @@ fn parse_value_function(function: &sqlparser::ast::Function) -> Result<JsonValue
                 ));
             }
             let path = expr_to_string_literal(&args[0], "ref(path)")?;
-            Ok(sentinel_object(FIREQL_REF_KEY, JsonValue::String(path)))
+            Ok(SqlValue::Reference(path))
         }
         "timestamp" => {
             if args.len() != 1 {
@@ -1130,7 +1123,9 @@ fn parse_value_function(function: &sqlparser::ast::Function) -> Result<JsonValue
                 ));
             }
             let value = expr_to_string_literal(&args[0], "timestamp(value)")?;
-            Ok(sentinel_object(FIREQL_TS_KEY, JsonValue::String(value)))
+            let parsed = DateTime::parse_from_rfc3339(&value)
+                .map_err(|e| FireqlError::InvalidQuery(format!("Invalid timestamp: {e}")))?;
+            Ok(SqlValue::Timestamp(parsed.with_timezone(&Utc)))
         }
         "current_timestamp" => {
             if !args.is_empty() {
@@ -1138,10 +1133,7 @@ fn parse_value_function(function: &sqlparser::ast::Function) -> Result<JsonValue
                     "CURRENT_TIMESTAMP expects no arguments".to_string(),
                 ));
             }
-            Ok(sentinel_object(
-                FIREQL_CURRENT_TS_KEY,
-                JsonValue::Bool(true),
-            ))
+            Ok(SqlValue::CurrentTimestamp)
         }
         _ => Err(FireqlError::Unsupported(format!(
             "Unsupported function in value expression: {name}"
