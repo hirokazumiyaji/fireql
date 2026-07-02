@@ -367,10 +367,11 @@ async fn execute_insert_select(
         return Ok(FireqlOutput::Affected { affected: 0 });
     }
 
-    let chunks = docs
-        .chunks(BATCH_LIMIT)
-        .map(|chunk| chunk.to_vec())
-        .collect::<Vec<_>>();
+    let mut chunks: Vec<Vec<Document>> = Vec::new();
+    let mut doc_iter = docs.into_iter().peekable();
+    while doc_iter.peek().is_some() {
+        chunks.push(doc_iter.by_ref().take(BATCH_LIMIT).collect());
+    }
     let stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
         let collection = stmt.collection.clone();
@@ -380,8 +381,9 @@ async fn execute_insert_select(
             let parent = insert_parent_path(&db, &collection);
             let writer = db.create_simple_batch_writer().await?;
             let mut batch = writer.new_batch();
+            let chunk_len = chunk.len();
 
-            for doc in &chunk {
+            for doc in chunk {
                 let parts = build_insert_select_parts(doc, columns.as_deref(), &projection)?;
                 let id = parts.id.unwrap_or_else(generate_document_id);
                 let doc_path = format!("{parent}/{}/{}", collection.collection_id, id);
@@ -399,7 +401,7 @@ async fn execute_insert_select(
             let response = batch.write().await?;
             Ok::<(usize, Option<String>), FireqlError>(count_batch_outcome(
                 &response.statuses,
-                chunk.len(),
+                chunk_len,
             ))
         }
     }))
@@ -439,7 +441,7 @@ struct InsertSelectParts {
 }
 
 fn build_insert_select_parts(
-    doc: &Document,
+    doc: Document,
     columns: Option<&[String]>,
     projection: &Projection,
 ) -> Result<InsertSelectParts> {
@@ -448,13 +450,8 @@ fn build_insert_select_parts(
             id: None,
             fields: doc
                 .fields
-                .iter()
-                .map(|(field, value)| {
-                    (
-                        field.clone(),
-                        firestore::FirestoreValue::from(value.clone()),
-                    )
-                })
+                .into_iter()
+                .map(|(field, value)| (field, firestore::FirestoreValue::from(value)))
                 .collect(),
         }),
         (Some(columns), Projection::Fields(source_fields)) => {
@@ -839,7 +836,7 @@ mod tests {
             ],
         );
 
-        let parts = build_insert_select_parts(&doc, None, &Projection::All).expect("parts");
+        let parts = build_insert_select_parts(doc, None, &Projection::All).expect("parts");
 
         assert!(parts.id.is_none());
         assert_eq!(parts.fields.len(), 2);
@@ -862,7 +859,7 @@ mod tests {
         let source_fields = vec!["__name__".to_string(), "name".to_string()];
 
         let parts =
-            build_insert_select_parts(&doc, Some(&columns), &Projection::Fields(source_fields))
+            build_insert_select_parts(doc, Some(&columns), &Projection::Fields(source_fields))
                 .expect("parts");
 
         assert_eq!(parts.id.as_deref(), Some("u1"));
@@ -884,7 +881,7 @@ mod tests {
         let source_fields = vec!["name".to_string()];
 
         let parts =
-            build_insert_select_parts(&doc, Some(&columns), &Projection::Fields(source_fields))
+            build_insert_select_parts(doc, Some(&columns), &Projection::Fields(source_fields))
                 .expect("parts");
 
         assert!(parts.id.is_none());
