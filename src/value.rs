@@ -100,51 +100,17 @@ impl Serialize for FireqlValue {
                 map.serialize_entry("_firestore_type", "null")?;
                 map.end()
             }
-            Self::Boolean(b) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "boolean")?;
-                map.serialize_entry("value", b)?;
-                map.end()
-            }
-            Self::Integer(i) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "integer")?;
-                map.serialize_entry("value", i)?;
-                map.end()
-            }
-            Self::Double(d) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "double")?;
-                map.serialize_entry("value", d)?;
-                map.end()
-            }
-            Self::String(s) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "string")?;
-                map.serialize_entry("value", s)?;
-                map.end()
-            }
-            Self::Timestamp(dt) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "timestamp")?;
-                map.serialize_entry(
-                    "value",
-                    &dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
-                )?;
-                map.end()
-            }
-            Self::Bytes(b) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "bytes")?;
-                map.serialize_entry("value", b)?;
-                map.end()
-            }
-            Self::Reference(r) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "reference")?;
-                map.serialize_entry("value", to_relative_path(r))?;
-                map.end()
-            }
+            Self::Boolean(b) => typed_entry(serializer, "boolean", b),
+            Self::Integer(i) => typed_entry(serializer, "integer", i),
+            Self::Double(d) => typed_entry(serializer, "double", d),
+            Self::String(s) => typed_entry(serializer, "string", s),
+            Self::Timestamp(dt) => typed_entry(
+                serializer,
+                "timestamp",
+                &dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            ),
+            Self::Bytes(b) => typed_entry(serializer, "bytes", b),
+            Self::Reference(r) => typed_entry(serializer, "reference", to_relative_path(r)),
             Self::GeoPoint {
                 latitude,
                 longitude,
@@ -155,20 +121,21 @@ impl Serialize for FireqlValue {
                 map.serialize_entry("longitude", longitude)?;
                 map.end()
             }
-            Self::Array(arr) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "array")?;
-                map.serialize_entry("value", &TypedArray(arr))?;
-                map.end()
-            }
-            Self::Map(inner) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "map")?;
-                map.serialize_entry("value", inner)?;
-                map.end()
-            }
+            Self::Array(arr) => typed_entry(serializer, "array", &TypedArray(arr)),
+            Self::Map(inner) => typed_entry(serializer, "map", inner),
         }
     }
+}
+
+fn typed_entry<S: Serializer, T: Serialize + ?Sized>(
+    serializer: S,
+    type_name: &str,
+    value: &T,
+) -> Result<S::Ok, S::Error> {
+    let mut map = serializer.serialize_map(Some(2))?;
+    map.serialize_entry("_firestore_type", type_name)?;
+    map.serialize_entry("value", value)?;
+    map.end()
 }
 
 fn plain_json_value(v: &FireqlValue) -> serde_json::Value {
