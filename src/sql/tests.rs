@@ -45,6 +45,21 @@ fn update_requires_where() {
 }
 
 #[test]
+fn parse_update_with_order_by_and_limit() {
+    let stmt = parse_sql("UPDATE users SET status = 'active' WHERE age >= 18 ORDER BY age LIMIT 5")
+        .unwrap();
+    match stmt {
+        StatementAst::Update(update) => {
+            assert_eq!(update.order_by.len(), 1);
+            assert_eq!(update.order_by[0].field, "age");
+            assert!(matches!(update.order_by[0].direction, OrderDirection::Asc));
+            assert_eq!(update.limit, Some(5));
+        }
+        _ => panic!("expected update"),
+    }
+}
+
+#[test]
 fn delete_collection_group_requires_where() {
     let err = parse_sql("DELETE FROM collection_group('logs')").unwrap_err();
     assert!(matches!(err, FireqlError::MissingWhere));
@@ -308,7 +323,7 @@ fn parse_array_contains() {
             match filter {
                 FilterExpr::ArrayContains { field, value } => {
                     assert_eq!(field, "tags");
-                    assert_eq!(value, JsonValue::from("a"));
+                    assert_eq!(value, SqlValue::Literal(JsonValue::from("a")));
                 }
                 _ => panic!("expected array_contains filter"),
             }
@@ -343,8 +358,7 @@ fn parse_ref_value() {
             let filter = select.filter.expect("filter");
             match filter {
                 FilterExpr::Compare { value, .. } => {
-                    let obj = value.as_object().expect("object");
-                    assert_eq!(obj.get(FIREQL_REF_KEY).unwrap(), "users/user1");
+                    assert_eq!(value, SqlValue::Reference("users/user1".to_string()));
                 }
                 _ => panic!("expected compare filter"),
             }
@@ -363,8 +377,10 @@ fn parse_timestamp_value() {
             let filter = select.filter.expect("filter");
             match filter {
                 FilterExpr::Compare { value, .. } => {
-                    let obj = value.as_object().expect("object");
-                    assert_eq!(obj.get(FIREQL_TS_KEY).unwrap(), "2024-01-01T00:00:00Z");
+                    let expected = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                        .unwrap()
+                        .with_timezone(&chrono::Utc);
+                    assert_eq!(value, SqlValue::Timestamp(expected));
                 }
                 _ => panic!("expected compare filter"),
             }
@@ -381,11 +397,7 @@ fn parse_current_timestamp_value() {
             let filter = select.filter.expect("filter");
             match filter {
                 FilterExpr::Compare { value, .. } => {
-                    let obj = value.as_object().expect("object");
-                    assert_eq!(
-                        obj.get(FIREQL_CURRENT_TS_KEY).unwrap(),
-                        &JsonValue::Bool(true)
-                    );
+                    assert_eq!(value, SqlValue::CurrentTimestamp);
                 }
                 _ => panic!("expected compare filter"),
             }
@@ -403,11 +415,7 @@ fn parse_update_with_current_timestamp_assignment() {
             assert_eq!(update.assignments.len(), 1);
             let (field, value) = &update.assignments[0];
             assert_eq!(field, "updated_at");
-            let obj = value.as_object().expect("object");
-            assert_eq!(
-                obj.get(FIREQL_CURRENT_TS_KEY).unwrap(),
-                &JsonValue::Bool(true)
-            );
+            assert_eq!(value, &SqlValue::CurrentTimestamp);
         }
         _ => panic!("expected update"),
     }
@@ -735,4 +743,52 @@ fn select_wildcard_with_fields_is_all() {
         }
         _ => panic!("expected select"),
     }
+}
+
+#[test]
+fn delete_using_is_rejected() {
+    let err = parse_sql("DELETE FROM users USING orders WHERE flag = true").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn delete_returning_is_rejected() {
+    let err = parse_sql("DELETE FROM users WHERE flag = true RETURNING id").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn update_from_is_rejected() {
+    let err = parse_sql("UPDATE users SET a = 1 FROM orders WHERE flag = true").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn update_returning_is_rejected() {
+    let err = parse_sql("UPDATE users SET a = 1 WHERE flag = true RETURNING id").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn update_or_conflict_clause_is_rejected() {
+    let err = parse_sql("UPDATE OR IGNORE users SET a = 1 WHERE flag = true").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn select_with_cte_is_rejected() {
+    let err = parse_sql("WITH x AS (SELECT * FROM users) SELECT * FROM x").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn select_fetch_is_rejected() {
+    let err = parse_sql("SELECT * FROM users FETCH FIRST 5 ROWS ONLY").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
+}
+
+#[test]
+fn select_for_update_is_rejected() {
+    let err = parse_sql("SELECT * FROM users FOR UPDATE").unwrap_err();
+    assert!(matches!(err, FireqlError::Unsupported(_)));
 }

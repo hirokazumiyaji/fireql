@@ -1,10 +1,10 @@
 use super::{
     AggregationExpr, AggregationFunc, CollectionSpec, CompareOp, DeleteStatement, FilterExpr,
     InsertSelectStatement, JoinSpec, JoinType, OrderBy, OrderDirection, Projection,
-    SelectProjection, SelectStatement, StatementAst, UnaryOp, UpdateStatement,
-    FIREQL_CURRENT_TS_KEY, FIREQL_REF_KEY, FIREQL_TS_KEY,
+    SelectProjection, SelectStatement, SqlValue, StatementAst, UnaryOp, UpdateStatement,
 };
 use crate::error::{FireqlError, Result};
+use chrono::{DateTime, Utc};
 use serde_json::Value as JsonValue;
 use sqlparser::ast::{
     AssignmentTarget, Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
@@ -13,10 +13,6 @@ use sqlparser::ast::{
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
-
-fn sentinel_object(key: &str, value: JsonValue) -> JsonValue {
-    JsonValue::Object([(key.to_string(), value)].into_iter().collect())
-}
 
 fn reject_function_modifiers(function: &sqlparser::ast::Function, context: &str) -> Result<()> {
     let has_distinct = matches!(
@@ -30,10 +26,20 @@ fn reject_function_modifiers(function: &sqlparser::ast::Function, context: &str)
     }
     Ok(())
 }
-pub fn parse_sql(input: &str) -> Result<StatementAst> {
-    if let Some(stmt) = super::rewrite::try_parse_delete_table_function(input)? {
-        return Ok(stmt);
+
+/// Rejects clauses that sqlparser accepts but fireql does not translate, so
+/// they can never be silently dropped (e.g. DELETE USING or TOP would
+/// otherwise change the statement's semantics without warning).
+fn reject_unsupported_clauses(clauses: &[(bool, &str)]) -> Result<()> {
+    if let Some((_, clause)) = clauses.iter().find(|(present, _)| *present) {
+        return Err(FireqlError::Unsupported(format!(
+            "{clause} is not supported"
+        )));
     }
+    Ok(())
+}
+
+pub fn parse_sql(input: &str) -> Result<StatementAst> {
     if let Some(stmt) = super::rewrite::try_parse_insert_collection_function(input)? {
         return Ok(stmt);
     }
@@ -52,6 +58,13 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
     match stmt {
         Statement::Query(query) => parse_query(*query),
         Statement::Update(update) => {
+            reject_unsupported_clauses(&[
+                (!update.optimizer_hints.is_empty(), "optimizer hints"),
+                (update.from.is_some(), "UPDATE ... FROM"),
+                (update.returning.is_some(), "RETURNING"),
+                (update.output.is_some(), "OUTPUT"),
+                (update.or.is_some(), "UPDATE OR ..."),
+            ])?;
             let collection = parse_table_with_joins(&update.table)?;
             let filter = update
                 .selection
@@ -59,15 +72,24 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
                 .transpose()?
                 .ok_or(FireqlError::MissingWhere)?;
             let assignments = parse_assignments(update.assignments)?;
+            let (order_by, limit) =
+                parse_order_and_limit_from_query_parts(Some(update.order_by), update.limit)?;
             Ok(StatementAst::Update(UpdateStatement {
                 collection,
                 assignments,
                 filter,
-                order_by: vec![],
-                limit: None,
+                order_by,
+                limit,
             }))
         }
         Statement::Delete(delete) => {
+            reject_unsupported_clauses(&[
+                (!delete.optimizer_hints.is_empty(), "optimizer hints"),
+                (!delete.tables.is_empty(), "Multi-table DELETE"),
+                (delete.using.is_some(), "USING"),
+                (delete.returning.is_some(), "RETURNING"),
+                (delete.output.is_some(), "OUTPUT"),
+            ])?;
             let from = match delete.from {
                 FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
             };
@@ -102,28 +124,29 @@ pub(super) fn parse_insert_select(
     insert: sqlparser::ast::Insert,
     collection_override: Option<CollectionSpec>,
 ) -> Result<StatementAst> {
-    if !insert.into
-        || !insert.optimizer_hints.is_empty()
-        || insert.or.is_some()
-        || insert.ignore
-        || insert.table_alias.is_some()
-        || insert.overwrite
-        || insert.partitioned.is_some()
-        || !insert.after_columns.is_empty()
-        || !insert.assignments.is_empty()
-        || insert.on.is_some()
-        || insert.returning.is_some()
-        || insert.replace_into
-        || insert.priority.is_some()
-        || insert.insert_alias.is_some()
-        || insert.settings.is_some()
-        || insert.format_clause.is_some()
-        || insert.has_table_keyword
-    {
+    if !insert.into || insert.has_table_keyword {
         return Err(FireqlError::Unsupported(
             "Only INSERT INTO ... SELECT is supported".to_string(),
         ));
     }
+    reject_unsupported_clauses(&[
+        (!insert.optimizer_hints.is_empty(), "optimizer hints"),
+        (insert.or.is_some(), "INSERT OR ..."),
+        (insert.ignore, "INSERT IGNORE"),
+        (insert.table_alias.is_some(), "INSERT target alias"),
+        (insert.overwrite, "INSERT OVERWRITE"),
+        (insert.partitioned.is_some(), "PARTITION"),
+        (!insert.after_columns.is_empty(), "AFTER columns"),
+        (!insert.assignments.is_empty(), "INSERT ... SET"),
+        (insert.on.is_some(), "ON CONFLICT/ON DUPLICATE KEY"),
+        (insert.returning.is_some(), "RETURNING"),
+        (insert.output.is_some(), "OUTPUT"),
+        (insert.replace_into, "REPLACE INTO"),
+        (insert.priority.is_some(), "insert priority"),
+        (insert.insert_alias.is_some(), "insert alias"),
+        (insert.settings.is_some(), "SETTINGS"),
+        (insert.format_clause.is_some(), "FORMAT"),
+    ])?;
 
     let collection = match collection_override {
         Some(collection) => collection,
@@ -245,6 +268,16 @@ fn validate_insert_select_projection(
 }
 
 pub(super) fn parse_query(query: Query) -> Result<StatementAst> {
+    reject_unsupported_clauses(&[
+        (query.with.is_some(), "WITH (CTE)"),
+        (query.fetch.is_some(), "FETCH"),
+        (!query.locks.is_empty(), "FOR UPDATE/FOR SHARE"),
+        (query.for_clause.is_some(), "FOR XML/JSON/BROWSE"),
+        (query.settings.is_some(), "SETTINGS"),
+        (query.format_clause.is_some(), "FORMAT"),
+        (!query.pipe_operators.is_empty(), "Pipe operators"),
+    ])?;
+
     let order_by_exprs = match query.order_by {
         Some(order_by) => match order_by.kind {
             OrderByKind::Expressions(exprs) => exprs,
@@ -287,10 +320,7 @@ fn parse_select(
     order_by_exprs: Vec<OrderByExpr>,
     limit_expr: Option<Expr>,
 ) -> Result<StatementAst> {
-    // Reject clauses that sqlparser accepts but fireql does not translate, so they
-    // can never be silently dropped (e.g. TOP/QUALIFY would otherwise change the
-    // result set without warning).
-    let unsupported: &[(bool, &str)] = &[
+    reject_unsupported_clauses(&[
         (select.distinct.is_some(), "DISTINCT"),
         (select.top.is_some(), "TOP"),
         (select.having.is_some(), "HAVING"),
@@ -307,12 +337,7 @@ fn parse_select(
         (!select.distribute_by.is_empty(), "DISTRIBUTE BY"),
         (!select.sort_by.is_empty(), "SORT BY"),
         (!select.named_window.is_empty(), "WINDOW"),
-    ];
-    if let Some((_, clause)) = unsupported.iter().find(|(present, _)| *present) {
-        return Err(FireqlError::Unsupported(format!(
-            "{clause} is not supported"
-        )));
-    }
+    ])?;
     if !matches!(select.group_by, sqlparser::ast::GroupByExpr::Expressions(ref exprs, _) if exprs.is_empty())
     {
         return Err(FireqlError::Unsupported(
@@ -819,7 +844,7 @@ fn parse_limit_expr(expr: &Expr) -> Result<Option<u32>> {
 
 fn parse_assignments(
     assignments: Vec<sqlparser::ast::Assignment>,
-) -> Result<Vec<(String, JsonValue)>> {
+) -> Result<Vec<(String, SqlValue)>> {
     let mut result = Vec::with_capacity(assignments.len());
     for assignment in assignments {
         let field = match &assignment.target {
@@ -970,7 +995,7 @@ fn parse_function_args(args: &FunctionArguments) -> Result<Vec<Expr>> {
     Ok(exprs)
 }
 
-fn parse_value_list_expr(expr: &Expr) -> Result<Vec<JsonValue>> {
+fn parse_value_list_expr(expr: &Expr) -> Result<Vec<SqlValue>> {
     match expr {
         Expr::Array(array) => array
             .elem
@@ -1025,16 +1050,13 @@ fn parse_field_expr(expr: &Expr) -> Result<String> {
     }
 }
 
-fn parse_value_expr(expr: &Expr) -> Result<JsonValue> {
+fn parse_value_expr(expr: &Expr) -> Result<SqlValue> {
     match expr {
-        Expr::Value(vws) => parse_value(&vws.value),
+        Expr::Value(vws) => Ok(SqlValue::Literal(parse_value(&vws.value)?)),
         Expr::Function(function) => parse_value_function(function),
         Expr::Identifier(ident) => {
             if ident.value.eq_ignore_ascii_case("current_timestamp") {
-                Ok(sentinel_object(
-                    FIREQL_CURRENT_TS_KEY,
-                    JsonValue::Bool(true),
-                ))
+                Ok(SqlValue::CurrentTimestamp)
             } else {
                 Err(FireqlError::Unsupported(format!(
                     "Unsupported identifier in value expression: {ident}"
@@ -1046,7 +1068,7 @@ fn parse_value_expr(expr: &Expr) -> Result<JsonValue> {
                 Expr::Value(vws) => match &vws.value {
                     Value::Number(num, _) => {
                         let with_sign = format!("-{num}");
-                        parse_numeric(&with_sign)
+                        Ok(SqlValue::Literal(parse_numeric(&with_sign)?))
                     }
                     _ => Err(FireqlError::Unsupported(
                         "Unary minus only supported for numeric literals".to_string(),
@@ -1066,7 +1088,7 @@ fn parse_value_expr(expr: &Expr) -> Result<JsonValue> {
     }
 }
 
-fn parse_value_function(function: &sqlparser::ast::Function) -> Result<JsonValue> {
+fn parse_value_function(function: &sqlparser::ast::Function) -> Result<SqlValue> {
     let name = object_name_to_string(&function.name);
     let name_lower = name.to_ascii_lowercase();
     let args = parse_function_args(&function.args)?;
@@ -1079,7 +1101,7 @@ fn parse_value_function(function: &sqlparser::ast::Function) -> Result<JsonValue
                 ));
             }
             let path = expr_to_string_literal(&args[0], "ref(path)")?;
-            Ok(sentinel_object(FIREQL_REF_KEY, JsonValue::String(path)))
+            Ok(SqlValue::Reference(path))
         }
         "timestamp" => {
             if args.len() != 1 {
@@ -1088,7 +1110,9 @@ fn parse_value_function(function: &sqlparser::ast::Function) -> Result<JsonValue
                 ));
             }
             let value = expr_to_string_literal(&args[0], "timestamp(value)")?;
-            Ok(sentinel_object(FIREQL_TS_KEY, JsonValue::String(value)))
+            let parsed = DateTime::parse_from_rfc3339(&value)
+                .map_err(|e| FireqlError::InvalidQuery(format!("Invalid timestamp: {e}")))?;
+            Ok(SqlValue::Timestamp(parsed.with_timezone(&Utc)))
         }
         "current_timestamp" => {
             if !args.is_empty() {
@@ -1096,10 +1120,7 @@ fn parse_value_function(function: &sqlparser::ast::Function) -> Result<JsonValue
                     "CURRENT_TIMESTAMP expects no arguments".to_string(),
                 ));
             }
-            Ok(sentinel_object(
-                FIREQL_CURRENT_TS_KEY,
-                JsonValue::Bool(true),
-            ))
+            Ok(SqlValue::CurrentTimestamp)
         }
         _ => Err(FireqlError::Unsupported(format!(
             "Unsupported function in value expression: {name}"

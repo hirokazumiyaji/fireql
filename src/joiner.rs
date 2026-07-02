@@ -1,3 +1,4 @@
+use crate::error::{FireqlError, Result};
 use crate::output::DocOutput;
 use crate::sql::JoinType;
 use crate::value::FireqlValue;
@@ -34,18 +35,23 @@ impl JoinKey {
     }
 }
 
-fn doc_key(doc: &DocOutput, field: &str) -> Result<JoinKey, String> {
+fn doc_key(doc: &DocOutput, field: &str) -> Result<JoinKey> {
     if field == "__name__" {
         Ok(JoinKey::String(doc.id.clone()))
     } else {
         match doc.data.get(field) {
-            Some(v) => JoinKey::from_fireql_value(v),
+            Some(v) => {
+                JoinKey::from_fireql_value(v).map_err(|reason| FireqlError::UnsupportedJoinKey {
+                    field: field.to_string(),
+                    reason,
+                })
+            }
             None => Ok(JoinKey::Null),
         }
     }
 }
 
-pub fn extract_join_keys(docs: &[DocOutput], field: &str) -> Result<Vec<JoinKey>, String> {
+pub fn extract_join_keys(docs: &[DocOutput], field: &str) -> Result<Vec<JoinKey>> {
     let mut seen = HashSet::new();
     let mut keys = Vec::new();
     for doc in docs {
@@ -86,7 +92,7 @@ pub fn hash_join(
     left_docs: &[DocOutput],
     right_docs: &[DocOutput],
     params: &JoinParams<'_>,
-) -> Result<Vec<DocOutput>, String> {
+) -> Result<Vec<DocOutput>> {
     let JoinParams {
         left_field,
         right_field,
@@ -601,5 +607,23 @@ mod tests {
         )
         .unwrap();
         assert_eq!(result.len(), 2);
+    }
+
+    #[test]
+    fn hash_join_unsupported_key_type_reports_join_key_error() {
+        let left = vec![make_doc("u1", vec![("score", FireqlValue::Double(1.5))])];
+        let right = vec![make_doc("d1", vec![])];
+        let err = hash_join(
+            &left,
+            &right,
+            &jp("score", "__name__", JoinType::Inner, "l", "r", true),
+        )
+        .unwrap_err();
+        match err {
+            crate::error::FireqlError::UnsupportedJoinKey { field, .. } => {
+                assert_eq!(field, "score");
+            }
+            other => panic!("expected UnsupportedJoinKey, got {other:?}"),
+        }
     }
 }

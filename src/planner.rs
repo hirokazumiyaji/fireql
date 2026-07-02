@@ -1,7 +1,7 @@
 use crate::error::{FireqlError, Result};
 use crate::sql::{
     AggregationExpr, AggregationFunc, CollectionSpec, CompareOp, FilterExpr, OrderBy,
-    OrderDirection, Projection, UnaryOp, FIREQL_CURRENT_TS_KEY, FIREQL_REF_KEY, FIREQL_TS_KEY,
+    OrderDirection, Projection, SqlValue, UnaryOp,
 };
 use chrono::{DateTime, Utc};
 use firestore::{
@@ -13,7 +13,6 @@ use firestore::{
     FirestoreQueryParams, FirestoreValue,
 };
 use serde::Serialize;
-use serde_json::Value as JsonValue;
 use std::collections::BTreeSet;
 
 // Firestore disjunction value limits. `in` and `array-contains-any` allow 30,
@@ -307,13 +306,13 @@ pub fn build_filter(
         FilterExpr::ArrayContains { field, value } => Ok(FirestoreQueryFilter::Compare(Some(
             FirestoreQueryFilterCompare::ArrayContains(
                 field.clone(),
-                json_to_firestore_value_with_context(value, documents_path)?,
+                sql_value_to_firestore(value, documents_path)?,
             ),
         ))),
         FilterExpr::ArrayContainsAny { field, values } => Ok(FirestoreQueryFilter::Compare(Some(
             FirestoreQueryFilterCompare::ArrayContainsAny(
                 field.clone(),
-                json_array_to_firestore_value_with_context(values, documents_path)?,
+                sql_values_to_firestore_array(values, documents_path)?,
             ),
         ))),
         FilterExpr::InList {
@@ -321,7 +320,7 @@ pub fn build_filter(
             values,
             negated,
         } => {
-            let value = json_array_to_firestore_value_with_context(values, documents_path)?;
+            let value = sql_values_to_firestore_array(values, documents_path)?;
             let filter = if *negated {
                 FirestoreQueryFilterCompare::NotIn(field.clone(), value)
             } else {
@@ -357,10 +356,10 @@ pub fn build_filter(
 fn compare_op_to_firestore(
     field: &str,
     op: CompareOp,
-    value: &JsonValue,
+    value: &SqlValue,
     documents_path: Option<&str>,
 ) -> Result<FirestoreQueryFilterCompare> {
-    let firestore_value = json_to_firestore_value_with_context(value, documents_path)?;
+    let firestore_value = sql_value_to_firestore(value, documents_path)?;
     Ok(match op {
         CompareOp::Eq => FirestoreQueryFilterCompare::Equal(field.to_string(), firestore_value),
         CompareOp::NotEq => {
@@ -379,38 +378,28 @@ fn compare_op_to_firestore(
     })
 }
 
-pub(crate) fn json_to_firestore_value_with_context(
-    value: &JsonValue,
+pub(crate) fn sql_value_to_firestore(
+    value: &SqlValue,
     documents_path: Option<&str>,
 ) -> Result<FirestoreValue> {
-    if let JsonValue::Object(map) = value {
-        if let Some(JsonValue::String(path)) = map.get(FIREQL_REF_KEY) {
+    match value {
+        SqlValue::Literal(json) => Ok(json.clone().into()),
+        SqlValue::Reference(path) => {
             let full = expand_reference_path(path, documents_path)?;
-            let fv: FirestoreValue = FirestoreReference(full).into();
-            return Ok(fv);
+            Ok(FirestoreReference(full).into())
         }
-        if let Some(JsonValue::String(ts)) = map.get(FIREQL_TS_KEY) {
-            let parsed = DateTime::parse_from_rfc3339(ts)
-                .map_err(|e| FireqlError::InvalidQuery(format!("Invalid timestamp: {e}")))?;
-            let utc: DateTime<Utc> = parsed.with_timezone(&Utc);
-            let fv: FirestoreValue = FirestoreTimestamp(utc).into();
-            return Ok(fv);
-        }
-        if map.contains_key(FIREQL_CURRENT_TS_KEY) {
-            let fv: FirestoreValue = FirestoreTimestamp(Utc::now()).into();
-            return Ok(fv);
-        }
+        SqlValue::Timestamp(ts) => Ok(FirestoreTimestamp(*ts).into()),
+        SqlValue::CurrentTimestamp => Ok(FirestoreTimestamp(Utc::now()).into()),
     }
-    Ok(value.clone().into())
 }
 
-pub(crate) fn json_array_to_firestore_value_with_context(
-    values: &[JsonValue],
+pub(crate) fn sql_values_to_firestore_array(
+    values: &[SqlValue],
     documents_path: Option<&str>,
 ) -> Result<FirestoreValue> {
     let mut array_values = Vec::with_capacity(values.len());
     for value in values {
-        let fv = json_to_firestore_value_with_context(value, documents_path)?;
+        let fv = sql_value_to_firestore(value, documents_path)?;
         array_values.push(fv.value);
     }
     Ok(FirestoreValue::from(
@@ -463,7 +452,7 @@ mod tests {
     use super::*;
     use crate::sql::{CollectionSpec, OrderDirection};
     use gcloud_sdk::google::firestore::v1::value::ValueType;
-    use serde_json::json;
+    use serde_json::Value as JsonValue;
 
     fn collection() -> CollectionSpec {
         CollectionSpec {
@@ -517,7 +506,7 @@ mod tests {
         let filter = FilterExpr::Compare {
             field: "age".to_string(),
             op: CompareOp::Gt,
-            value: JsonValue::from(10),
+            value: SqlValue::Literal(JsonValue::from(10)),
         };
         let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
         assert!(result.is_ok());
@@ -528,7 +517,7 @@ mod tests {
         let filter = FilterExpr::Compare {
             field: "age".to_string(),
             op: CompareOp::GtEq,
-            value: JsonValue::from(10),
+            value: SqlValue::Literal(JsonValue::from(10)),
         };
         let order_by = vec![OrderBy {
             field: "name".to_string(),
@@ -544,7 +533,7 @@ mod tests {
         let filter = FilterExpr::Compare {
             field: "age".to_string(),
             op: CompareOp::Lt,
-            value: JsonValue::from(10),
+            value: SqlValue::Literal(JsonValue::from(10)),
         };
         let order_by = vec![OrderBy {
             field: "age".to_string(),
@@ -560,12 +549,12 @@ mod tests {
             FilterExpr::Compare {
                 field: "age".to_string(),
                 op: CompareOp::Gt,
-                value: JsonValue::from(10),
+                value: SqlValue::Literal(JsonValue::from(10)),
             },
             FilterExpr::Compare {
                 field: "score".to_string(),
                 op: CompareOp::Lt,
-                value: JsonValue::from(5),
+                value: SqlValue::Literal(JsonValue::from(5)),
             },
         ]);
         let order_by = vec![OrderBy {
@@ -581,7 +570,9 @@ mod tests {
     fn in_values_limit() {
         let filter = FilterExpr::InList {
             field: "age".to_string(),
-            values: (0..31).map(JsonValue::from).collect(),
+            values: (0..31)
+                .map(|v| SqlValue::Literal(JsonValue::from(v)))
+                .collect(),
             negated: false,
         };
         let err =
@@ -593,7 +584,9 @@ mod tests {
     fn in_allows_up_to_thirty_values() {
         let filter = FilterExpr::InList {
             field: "age".to_string(),
-            values: (0..30).map(JsonValue::from).collect(),
+            values: (0..30)
+                .map(|v| SqlValue::Literal(JsonValue::from(v)))
+                .collect(),
             negated: false,
         };
         let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
@@ -604,7 +597,9 @@ mod tests {
     fn not_in_still_limited_to_ten_values() {
         let filter = FilterExpr::InList {
             field: "age".to_string(),
-            values: (0..11).map(JsonValue::from).collect(),
+            values: (0..11)
+                .map(|v| SqlValue::Literal(JsonValue::from(v)))
+                .collect(),
             negated: true,
         };
         let err =
@@ -616,7 +611,9 @@ mod tests {
     fn array_contains_any_allows_up_to_thirty_values() {
         let filter = FilterExpr::ArrayContainsAny {
             field: "tags".to_string(),
-            values: (0..30).map(JsonValue::from).collect(),
+            values: (0..30)
+                .map(|v| SqlValue::Literal(JsonValue::from(v)))
+                .collect(),
         };
         let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
         assert!(result.is_ok());
@@ -627,13 +624,13 @@ mod tests {
         let filter = FilterExpr::And(vec![
             FilterExpr::InList {
                 field: "status".to_string(),
-                values: vec![JsonValue::from("a")],
+                values: vec![SqlValue::Literal(JsonValue::from("a"))],
                 negated: true,
             },
             FilterExpr::Compare {
                 field: "score".to_string(),
                 op: CompareOp::NotEq,
-                value: JsonValue::from(1),
+                value: SqlValue::Literal(JsonValue::from(1)),
             },
         ]);
         let order_by = vec![OrderBy {
@@ -650,12 +647,12 @@ mod tests {
         let filter = FilterExpr::And(vec![
             FilterExpr::InList {
                 field: "status".to_string(),
-                values: vec![JsonValue::from("a")],
+                values: vec![SqlValue::Literal(JsonValue::from("a"))],
                 negated: false,
             },
             FilterExpr::InList {
                 field: "role".to_string(),
-                values: vec![JsonValue::from("b")],
+                values: vec![SqlValue::Literal(JsonValue::from("b"))],
                 negated: false,
             },
         ]);
@@ -680,11 +677,11 @@ mod tests {
         let filter = FilterExpr::And(vec![
             FilterExpr::ArrayContainsAny {
                 field: "tags".to_string(),
-                values: vec![JsonValue::from("a")],
+                values: vec![SqlValue::Literal(JsonValue::from("a"))],
             },
             FilterExpr::InList {
                 field: "status".to_string(),
-                values: vec![JsonValue::from("b")],
+                values: vec![SqlValue::Literal(JsonValue::from("b"))],
                 negated: false,
             },
         ]);
@@ -698,7 +695,7 @@ mod tests {
         let filter = FilterExpr::Compare {
             field: "age".to_string(),
             op: CompareOp::Gt,
-            value: JsonValue::from(10),
+            value: SqlValue::Literal(JsonValue::from(10)),
         };
         let order_by = vec![OrderBy {
             field: "age".to_string(),
@@ -735,19 +732,9 @@ mod tests {
 
     #[test]
     fn reference_value_expands_relative_path() {
-        let value = JsonValue::Object(
-            [(
-                FIREQL_REF_KEY.to_string(),
-                JsonValue::String("users/u1".to_string()),
-            )]
-            .into_iter()
-            .collect(),
-        );
-        let fv = json_to_firestore_value_with_context(
-            &value,
-            Some("projects/p/databases/(default)/documents"),
-        )
-        .unwrap();
+        let value = SqlValue::Reference("users/u1".to_string());
+        let fv = sql_value_to_firestore(&value, Some("projects/p/databases/(default)/documents"))
+            .unwrap();
         match fv.value.value_type {
             Some(ValueType::ReferenceValue(path)) => {
                 assert_eq!(path, "projects/p/databases/(default)/documents/users/u1");
@@ -758,19 +745,9 @@ mod tests {
 
     #[test]
     fn reference_relative_path_starting_with_projects_is_expanded() {
-        let value = JsonValue::Object(
-            [(
-                FIREQL_REF_KEY.to_string(),
-                JsonValue::String("projects/p1".to_string()),
-            )]
-            .into_iter()
-            .collect(),
-        );
-        let fv = json_to_firestore_value_with_context(
-            &value,
-            Some("projects/p/databases/(default)/documents"),
-        )
-        .unwrap();
+        let value = SqlValue::Reference("projects/p1".to_string());
+        let fv = sql_value_to_firestore(&value, Some("projects/p/databases/(default)/documents"))
+            .unwrap();
         match fv.value.value_type {
             Some(ValueType::ReferenceValue(path)) => {
                 assert_eq!(path, "projects/p/databases/(default)/documents/projects/p1");
@@ -782,19 +759,10 @@ mod tests {
     #[test]
     fn reference_absolute_path_is_preserved() {
         let abs = "projects/p/databases/(default)/documents/users/u1";
-        let value = JsonValue::Object(
-            [(
-                FIREQL_REF_KEY.to_string(),
-                JsonValue::String(abs.to_string()),
-            )]
-            .into_iter()
-            .collect(),
-        );
-        let fv = json_to_firestore_value_with_context(
-            &value,
-            Some("projects/other/databases/(default)/documents"),
-        )
-        .unwrap();
+        let value = SqlValue::Reference(abs.to_string());
+        let fv =
+            sql_value_to_firestore(&value, Some("projects/other/databases/(default)/documents"))
+                .unwrap();
         match fv.value.value_type {
             Some(ValueType::ReferenceValue(path)) => {
                 assert_eq!(path, abs);
@@ -805,15 +773,11 @@ mod tests {
 
     #[test]
     fn timestamp_value_parses_rfc3339() {
-        let value = JsonValue::Object(
-            [(
-                FIREQL_TS_KEY.to_string(),
-                JsonValue::String("2024-01-01T00:00:00Z".to_string()),
-            )]
-            .into_iter()
-            .collect(),
-        );
-        let fv = json_to_firestore_value_with_context(&value, None).unwrap();
+        let parsed = chrono::DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let value = SqlValue::Timestamp(parsed);
+        let fv = sql_value_to_firestore(&value, None).unwrap();
         match fv.value.value_type {
             Some(ValueType::TimestampValue(ts)) => {
                 assert_eq!(ts.seconds, 1704067200);
@@ -824,8 +788,8 @@ mod tests {
 
     #[test]
     fn current_timestamp_value_is_now() {
-        let value = json!({ FIREQL_CURRENT_TS_KEY: true });
-        let fv = json_to_firestore_value_with_context(&value, None).unwrap();
+        let value = SqlValue::CurrentTimestamp;
+        let fv = sql_value_to_firestore(&value, None).unwrap();
         match fv.value.value_type {
             Some(ValueType::TimestampValue(ts)) => {
                 let now = Utc::now().timestamp();
