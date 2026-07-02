@@ -3,9 +3,9 @@ use crate::output::DocOutput;
 use crate::value::FireqlValue;
 
 pub(super) struct DocNameParts {
-    pub id: String,
-    pub path: String,
-    pub collection: String,
+    pub(super) id: String,
+    pub(super) path: String,
+    pub(super) collection: String,
     parent_full: Option<String>,
 }
 

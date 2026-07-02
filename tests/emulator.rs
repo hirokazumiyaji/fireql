@@ -66,6 +66,98 @@ async fn emulator_select_update_delete() -> Result<(), Box<dyn std::error::Error
 }
 
 #[tokio::test]
+async fn emulator_update_order_by_limit() -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let collection = format!("fireql_update_limit_{}", unique_suffix());
+
+    for (doc_id, priority) in [
+        ("d01", 1),
+        ("d02", 2),
+        ("d03", 3),
+        ("d04", 4),
+        ("d05", 5),
+        ("d06", 6),
+        ("d07", 7),
+        ("d08", 8),
+    ] {
+        let _: serde_json::Value = db
+            .create_obj(
+                &collection,
+                Some(doc_id),
+                &json!({"status": "pending", "priority": priority}),
+                None,
+            )
+            .await?;
+    }
+
+    let update_sql = format!(
+        "UPDATE {collection} SET status = 'done' \
+         WHERE status = 'pending' ORDER BY priority DESC LIMIT 5"
+    );
+    let output = fireql.execute(&update_sql).await?;
+    match output {
+        FireqlOutput::Affected { affected } => assert_eq!(affected, 5),
+        other => panic!("expected affected, got {other:?}"),
+    }
+
+    let done_sql = format!(
+        "SELECT __name__, priority FROM {collection} \
+         WHERE status = 'done' ORDER BY priority DESC"
+    );
+    let output = fireql.execute(&done_sql).await?;
+    match output {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 5);
+            let priorities: Vec<i64> = rows
+                .iter()
+                .map(|row| match row.data.get("priority") {
+                    Some(FireqlValue::Integer(p)) => *p,
+                    other => panic!("expected integer priority, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(priorities, vec![8, 7, 6, 5, 4]);
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+
+    let pending_sql = format!(
+        "SELECT __name__, priority FROM {collection} \
+         WHERE status = 'pending' ORDER BY priority ASC"
+    );
+    let output = fireql.execute(&pending_sql).await?;
+    match output {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 3);
+            let priorities: Vec<i64> = rows
+                .iter()
+                .map(|row| match row.data.get("priority") {
+                    Some(FireqlValue::Integer(p)) => *p,
+                    other => panic!("expected integer priority, got {other:?}"),
+                })
+                .collect();
+            assert_eq!(priorities, vec![1, 2, 3]);
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn emulator_insert_select_auto_id_copy() -> Result<(), Box<dyn std::error::Error>> {
     if should_skip() {
         eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
