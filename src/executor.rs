@@ -371,10 +371,7 @@ async fn execute_insert_select(
         .chunks(BATCH_LIMIT)
         .map(|chunk| chunk.to_vec())
         .collect::<Vec<_>>();
-    let mut affected = 0u64;
-    let mut first_error: Option<String> = None;
-
-    let mut stream = stream::iter(chunks.into_iter().map(|chunk| {
+    let stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
         let collection = stmt.collection.clone();
         let columns = stmt.columns.clone();
@@ -408,27 +405,7 @@ async fn execute_insert_select(
     }))
     .buffer_unordered(batch_parallelism);
 
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok((count, write_error)) => {
-                affected += count as u64;
-                if first_error.is_none() {
-                    first_error = write_error;
-                }
-            }
-            Err(err) => {
-                if first_error.is_none() {
-                    first_error = Some(err.to_string());
-                }
-            }
-        }
-    }
-
-    if let Some(error) = first_error {
-        return Err(FireqlError::PartialFailure { affected, error });
-    }
-
-    Ok(FireqlOutput::Affected { affected })
+    drain_batch_results(stream).await
 }
 
 fn insert_select_query_projection(projection: &Projection) -> Option<Projection> {
@@ -542,6 +519,40 @@ fn count_batch_outcome(statuses: &[Status], chunk_len: usize) -> (usize, Option<
     (chunk_len.saturating_sub(failures), first_error)
 }
 
+/// Drains a `buffer_unordered` stream of per-chunk write results, summing the
+/// succeeded count and keeping only the first error. Any error downgrades the
+/// whole statement to `PartialFailure` so callers never see a partial success
+/// reported as a full success.
+async fn drain_batch_results(
+    mut stream: impl futures::Stream<Item = std::result::Result<(usize, Option<String>), FireqlError>>
+        + Unpin,
+) -> Result<FireqlOutput> {
+    let mut affected = 0u64;
+    let mut first_error: Option<String> = None;
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok((count, write_error)) => {
+                affected += count as u64;
+                if first_error.is_none() {
+                    first_error = write_error;
+                }
+            }
+            Err(err) => {
+                if first_error.is_none() {
+                    first_error = Some(err.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(FireqlError::PartialFailure { affected, error });
+    }
+
+    Ok(FireqlOutput::Affected { affected })
+}
+
 async fn execute_batch_write(
     db: &FirestoreDb,
     collection: &CollectionSpec,
@@ -570,10 +581,7 @@ async fn execute_batch_write(
         .map(|chunk| chunk.to_vec())
         .collect::<Vec<_>>();
 
-    let mut affected = 0u64;
-    let mut first_error: Option<String> = None;
-
-    let mut stream = stream::iter(chunks.into_iter().map(|chunk| {
+    let stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
         let op = op.clone();
         async move {
@@ -610,27 +618,7 @@ async fn execute_batch_write(
     }))
     .buffer_unordered(batch_parallelism);
 
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok((count, write_error)) => {
-                affected += count as u64;
-                if first_error.is_none() {
-                    first_error = write_error;
-                }
-            }
-            Err(err) => {
-                if first_error.is_none() {
-                    first_error = Some(err.to_string());
-                }
-            }
-        }
-    }
-
-    if let Some(error) = first_error {
-        return Err(FireqlError::PartialFailure { affected, error });
-    }
-
-    Ok(FireqlOutput::Affected { affected })
+    drain_batch_results(stream).await
 }
 
 #[derive(Clone)]
@@ -987,5 +975,32 @@ mod tests {
         let (succeeded, err) = count_batch_outcome(&[], 5);
         assert_eq!(succeeded, 5);
         assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn drain_batch_results_sums_affected_on_success() {
+        let stream = stream::iter(vec![Ok::<_, FireqlError>((2, None)), Ok((3, None))]);
+        let output = drain_batch_results(stream).await.unwrap();
+        match output {
+            FireqlOutput::Affected { affected } => assert_eq!(affected, 5),
+            other => panic!("expected affected output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_batch_results_reports_first_error_as_partial_failure() {
+        let stream = stream::iter(vec![
+            Ok::<_, FireqlError>((2, None)),
+            Ok((1, Some("boom".to_string()))),
+            Err(FireqlError::Format("io".to_string())),
+        ]);
+        let err = drain_batch_results(stream).await.unwrap_err();
+        match err {
+            FireqlError::PartialFailure { affected, error } => {
+                assert_eq!(affected, 3);
+                assert_eq!(error, "boom");
+            }
+            other => panic!("expected partial failure, got {other:?}"),
+        }
     }
 }
