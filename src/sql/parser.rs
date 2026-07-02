@@ -31,9 +31,6 @@ fn reject_function_modifiers(function: &sqlparser::ast::Function, context: &str)
     Ok(())
 }
 pub fn parse_sql(input: &str) -> Result<StatementAst> {
-    if let Some(stmt) = super::rewrite::try_parse_delete_table_function(input)? {
-        return Ok(stmt);
-    }
     if let Some(stmt) = super::rewrite::try_parse_insert_collection_function(input)? {
         return Ok(stmt);
     }

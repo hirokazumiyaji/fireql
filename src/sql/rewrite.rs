@@ -1,5 +1,5 @@
 use super::parser::{parse_insert_select, parse_query};
-use super::{CollectionSpec, DeleteStatement, StatementAst};
+use super::{CollectionSpec, StatementAst};
 use crate::error::{FireqlError, Result};
 use sqlparser::ast::Statement;
 use sqlparser::dialect::GenericDialect;
@@ -115,64 +115,6 @@ fn parse_collection_target_expr(target_expr: &str) -> Result<CollectionSpec> {
         },
         _ => Err(FireqlError::Unsupported(
             "INSERT target rewrite produced unsupported statement".to_string(),
-        )),
-    }
-}
-
-pub(super) fn try_parse_delete_table_function(input: &str) -> Result<Option<StatementAst>> {
-    let trimmed = input.trim_start();
-
-    let mut parts = trimmed.splitn(2, char::is_whitespace);
-    if !parts.next().unwrap_or("").eq_ignore_ascii_case("delete") {
-        return Ok(None);
-    }
-
-    let rest_trimmed = parts.next().unwrap_or("").trim_start();
-    let mut words = rest_trimmed.splitn(2, char::is_whitespace);
-    if !words.next().unwrap_or("").eq_ignore_ascii_case("from") {
-        return Ok(None);
-    }
-    let after_from = words.next().unwrap_or("").trim_start();
-    if !after_from.split_once('(').is_some_and(|(name, _)| {
-        let n = name.trim();
-        n.eq_ignore_ascii_case("collection_group") || n.eq_ignore_ascii_case("collection")
-    }) {
-        return Ok(None);
-    }
-
-    let select_sql = format!("SELECT * {rest_trimmed}");
-
-    let dialect = GenericDialect {};
-    let mut statements = Parser::parse_sql(&dialect, &select_sql)
-        .map_err(|e| FireqlError::SqlParse(e.to_string()))?;
-
-    if statements.len() != 1 {
-        return Err(FireqlError::Unsupported(
-            "Only a single SQL statement is supported".to_string(),
-        ));
-    }
-
-    match statements.remove(0) {
-        Statement::Query(query) => {
-            let stmt = match parse_query(*query)? {
-                StatementAst::Select(select) => select,
-                _ => {
-                    return Err(FireqlError::Unsupported(
-                        "DELETE rewrite produced unsupported statement".to_string(),
-                    ))
-                }
-            };
-
-            let filter = stmt.filter.ok_or(FireqlError::MissingWhere)?;
-            Ok(Some(StatementAst::Delete(DeleteStatement {
-                collection: stmt.collection,
-                filter,
-                order_by: stmt.order_by,
-                limit: stmt.limit,
-            })))
-        }
-        _ => Err(FireqlError::Unsupported(
-            "DELETE rewrite produced unsupported statement".to_string(),
         )),
     }
 }
