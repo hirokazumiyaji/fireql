@@ -10,7 +10,7 @@ use std::collections::HashSet;
 
 // Firestore allows up to 30 disjunctions in an `in` filter; keep in sync
 // with MAX_IN_VALUES in planner.rs.
-pub(super) const FIRESTORE_IN_LIMIT: usize = 30;
+const FIRESTORE_IN_LIMIT: usize = 30;
 
 pub(super) async fn execute_select(
     db: &FirestoreDb,
@@ -113,11 +113,7 @@ fn strip_alias_from_filter(filter: &FilterExpr, alias: &str) -> FilterExpr {
 /// joins. Regular fields, by contrast, are prefixed with their alias on chained
 /// joins because the left rows are already prefixed (e.g. `u.dept_id`).
 /// A previous right table's `__name__` cannot be used: that id is never retained.
-pub(super) fn effective_left_join_field(
-    join: &JoinSpec,
-    is_joined: bool,
-    left_alias: &str,
-) -> Result<String> {
+fn effective_left_join_field(join: &JoinSpec, is_joined: bool, left_alias: &str) -> Result<String> {
     if join.left_field == "__name__" {
         let qualifier = join.left_alias.as_deref().unwrap_or(left_alias);
         if is_joined && qualifier != left_alias {
@@ -187,6 +183,10 @@ async fn execute_join_select(
         };
 
         for chunk in chunks {
+            // The full document path is deliberately sent as a plain string
+            // (`SqlValue::Literal`), not `SqlValue::Reference`: the string form
+            // is what the emulator e2e join tests validate against `__name__`;
+            // a ReferenceValue here would change the wire type untested.
             let in_values: Vec<SqlValue> = if join.right_field == "__name__" {
                 chunk
                     .iter()

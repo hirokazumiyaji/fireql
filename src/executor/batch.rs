@@ -9,7 +9,7 @@ use futures::stream::{self, StreamExt, TryStreamExt};
 use gcloud_sdk::google::firestore::v1::{document_transform, write, DocumentMask, Write};
 use gcloud_sdk::google::rpc::Status;
 
-pub(super) const BATCH_LIMIT: usize = 500;
+const BATCH_LIMIT: usize = 500;
 
 /// Split owned items into `BATCH_LIMIT`-sized batches, moving each item into
 /// its batch rather than cloning.

@@ -26,6 +26,19 @@ fn reject_function_modifiers(function: &sqlparser::ast::Function, context: &str)
     }
     Ok(())
 }
+
+/// Rejects clauses that sqlparser accepts but fireql does not translate, so
+/// they can never be silently dropped (e.g. DELETE USING or TOP would
+/// otherwise change the statement's semantics without warning).
+fn reject_unsupported_clauses(clauses: &[(bool, &str)]) -> Result<()> {
+    if let Some((_, clause)) = clauses.iter().find(|(present, _)| *present) {
+        return Err(FireqlError::Unsupported(format!(
+            "{clause} is not supported"
+        )));
+    }
+    Ok(())
+}
+
 pub fn parse_sql(input: &str) -> Result<StatementAst> {
     if let Some(stmt) = super::rewrite::try_parse_insert_collection_function(input)? {
         return Ok(stmt);
@@ -45,18 +58,13 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
     match stmt {
         Statement::Query(query) => parse_query(*query),
         Statement::Update(update) => {
-            let unsupported: &[(bool, &str)] = &[
+            reject_unsupported_clauses(&[
                 (!update.optimizer_hints.is_empty(), "optimizer hints"),
                 (update.from.is_some(), "UPDATE ... FROM"),
                 (update.returning.is_some(), "RETURNING"),
                 (update.output.is_some(), "OUTPUT"),
                 (update.or.is_some(), "UPDATE OR ..."),
-            ];
-            if let Some((_, clause)) = unsupported.iter().find(|(present, _)| *present) {
-                return Err(FireqlError::Unsupported(format!(
-                    "{clause} is not supported"
-                )));
-            }
+            ])?;
             let collection = parse_table_with_joins(&update.table)?;
             let filter = update
                 .selection
@@ -75,18 +83,13 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
             }))
         }
         Statement::Delete(delete) => {
-            let unsupported: &[(bool, &str)] = &[
+            reject_unsupported_clauses(&[
                 (!delete.optimizer_hints.is_empty(), "optimizer hints"),
                 (!delete.tables.is_empty(), "Multi-table DELETE"),
                 (delete.using.is_some(), "USING"),
                 (delete.returning.is_some(), "RETURNING"),
                 (delete.output.is_some(), "OUTPUT"),
-            ];
-            if let Some((_, clause)) = unsupported.iter().find(|(present, _)| *present) {
-                return Err(FireqlError::Unsupported(format!(
-                    "{clause} is not supported"
-                )));
-            }
+            ])?;
             let from = match delete.from {
                 FromTable::WithFromKeyword(tables) | FromTable::WithoutKeyword(tables) => tables,
             };
@@ -121,29 +124,29 @@ pub(super) fn parse_insert_select(
     insert: sqlparser::ast::Insert,
     collection_override: Option<CollectionSpec>,
 ) -> Result<StatementAst> {
-    if !insert.into
-        || !insert.optimizer_hints.is_empty()
-        || insert.or.is_some()
-        || insert.ignore
-        || insert.table_alias.is_some()
-        || insert.overwrite
-        || insert.partitioned.is_some()
-        || !insert.after_columns.is_empty()
-        || !insert.assignments.is_empty()
-        || insert.on.is_some()
-        || insert.returning.is_some()
-        || insert.output.is_some()
-        || insert.replace_into
-        || insert.priority.is_some()
-        || insert.insert_alias.is_some()
-        || insert.settings.is_some()
-        || insert.format_clause.is_some()
-        || insert.has_table_keyword
-    {
+    if !insert.into || insert.has_table_keyword {
         return Err(FireqlError::Unsupported(
             "Only INSERT INTO ... SELECT is supported".to_string(),
         ));
     }
+    reject_unsupported_clauses(&[
+        (!insert.optimizer_hints.is_empty(), "optimizer hints"),
+        (insert.or.is_some(), "INSERT OR ..."),
+        (insert.ignore, "INSERT IGNORE"),
+        (insert.table_alias.is_some(), "INSERT target alias"),
+        (insert.overwrite, "INSERT OVERWRITE"),
+        (insert.partitioned.is_some(), "PARTITION"),
+        (!insert.after_columns.is_empty(), "AFTER columns"),
+        (!insert.assignments.is_empty(), "INSERT ... SET"),
+        (insert.on.is_some(), "ON CONFLICT/ON DUPLICATE KEY"),
+        (insert.returning.is_some(), "RETURNING"),
+        (insert.output.is_some(), "OUTPUT"),
+        (insert.replace_into, "REPLACE INTO"),
+        (insert.priority.is_some(), "insert priority"),
+        (insert.insert_alias.is_some(), "insert alias"),
+        (insert.settings.is_some(), "SETTINGS"),
+        (insert.format_clause.is_some(), "FORMAT"),
+    ])?;
 
     let collection = match collection_override {
         Some(collection) => collection,
@@ -265,10 +268,7 @@ fn validate_insert_select_projection(
 }
 
 pub(super) fn parse_query(query: Query) -> Result<StatementAst> {
-    // Reject query-shell clauses that sqlparser accepts but fireql does not
-    // translate, so they can never be silently dropped (same principle as the
-    // clause table in parse_select).
-    let unsupported: &[(bool, &str)] = &[
+    reject_unsupported_clauses(&[
         (query.with.is_some(), "WITH (CTE)"),
         (query.fetch.is_some(), "FETCH"),
         (!query.locks.is_empty(), "FOR UPDATE/FOR SHARE"),
@@ -276,12 +276,7 @@ pub(super) fn parse_query(query: Query) -> Result<StatementAst> {
         (query.settings.is_some(), "SETTINGS"),
         (query.format_clause.is_some(), "FORMAT"),
         (!query.pipe_operators.is_empty(), "Pipe operators"),
-    ];
-    if let Some((_, clause)) = unsupported.iter().find(|(present, _)| *present) {
-        return Err(FireqlError::Unsupported(format!(
-            "{clause} is not supported"
-        )));
-    }
+    ])?;
 
     let order_by_exprs = match query.order_by {
         Some(order_by) => match order_by.kind {
@@ -325,10 +320,7 @@ fn parse_select(
     order_by_exprs: Vec<OrderByExpr>,
     limit_expr: Option<Expr>,
 ) -> Result<StatementAst> {
-    // Reject clauses that sqlparser accepts but fireql does not translate, so they
-    // can never be silently dropped (e.g. TOP/QUALIFY would otherwise change the
-    // result set without warning).
-    let unsupported: &[(bool, &str)] = &[
+    reject_unsupported_clauses(&[
         (select.distinct.is_some(), "DISTINCT"),
         (select.top.is_some(), "TOP"),
         (select.having.is_some(), "HAVING"),
@@ -345,12 +337,7 @@ fn parse_select(
         (!select.distribute_by.is_empty(), "DISTRIBUTE BY"),
         (!select.sort_by.is_empty(), "SORT BY"),
         (!select.named_window.is_empty(), "WINDOW"),
-    ];
-    if let Some((_, clause)) = unsupported.iter().find(|(present, _)| *present) {
-        return Err(FireqlError::Unsupported(format!(
-            "{clause} is not supported"
-        )));
-    }
+    ])?;
     if !matches!(select.group_by, sqlparser::ast::GroupByExpr::Expressions(ref exprs, _) if exprs.is_empty())
     {
         return Err(FireqlError::Unsupported(
