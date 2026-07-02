@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::output::{DocOutput, FireqlOutput};
 use crate::value::FireqlValue;
+use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
@@ -34,6 +35,13 @@ fn collect_field_names(rows: &[DocOutput]) -> Vec<String> {
         names.extend(row.data.keys().cloned());
     }
     names.into_iter().collect()
+}
+
+fn aggregation_row(map: &HashMap<String, FireqlValue>) -> (Vec<&String>, Vec<String>) {
+    let mut keys: Vec<&String> = map.keys().collect();
+    keys.sort();
+    let values = keys.iter().map(|k| map[*k].to_plain_string()).collect();
+    (keys, values)
 }
 
 /// Spreadsheet apps execute cells starting with '=', '+', '-', '@', TAB or CR
@@ -109,11 +117,9 @@ fn format_csv(output: &FireqlOutput) -> Result<String> {
             if map.is_empty() {
                 return Ok(String::new());
             }
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            let (keys, values) = aggregation_row(map);
             wtr.write_record(keys.iter().map(|k| k.as_str()))
                 .map_err(csv_error)?;
-            let values: Vec<String> = keys.iter().map(|k| map[*k].to_plain_string()).collect();
             wtr.write_record(&values).map_err(csv_error)?;
         }
     }
@@ -171,17 +177,12 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
             if map.is_empty() {
                 return Ok(String::new());
             }
-            let mut keys: Vec<&String> = map.keys().collect();
-            keys.sort();
+            let (keys, values) = aggregation_row(map);
             let mut table = Table::new();
             table.load_preset(ASCII_FULL);
             table.set_content_arrangement(ContentArrangement::Dynamic);
             table.set_header(keys.iter().map(|k| strip_control_chars(k)));
-            let values: Vec<String> = keys
-                .iter()
-                .map(|k| strip_control_chars(&map[*k].to_plain_string()))
-                .collect();
-            table.add_row(values);
+            table.add_row(values.iter().map(|v| strip_control_chars(v)));
             Ok(table.to_string())
         }
     }
