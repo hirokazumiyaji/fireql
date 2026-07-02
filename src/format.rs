@@ -1,5 +1,6 @@
 use crate::error::Result;
 use crate::output::{DocOutput, FireqlOutput};
+use crate::value::FireqlValue;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
 pub enum Format {
@@ -35,22 +36,48 @@ fn collect_field_names(rows: &[DocOutput]) -> Vec<String> {
     names.into_iter().collect()
 }
 
-fn build_row_data(rows: &[DocOutput]) -> (Vec<String>, Vec<Vec<String>>) {
+/// Spreadsheet apps execute cells starting with '=', '+', '-', '@', TAB or CR
+/// as formulas, so exported CSV can trigger code execution when opened
+/// (CSV injection). Only string and reference cells are escaped, since they
+/// carry arbitrary author text. Numeric and JSON-encoded cells have
+/// fireql-controlled leading characters, and base64 bytes stay unescaped to
+/// remain round-trippable: a leading '+' only yields a harmless `#NAME?` cell
+/// because the base64 alphabet cannot form an executable formula payload.
+fn escape_formula_cell(text: String) -> String {
+    match text.as_bytes().first() {
+        Some(b'=' | b'+' | b'-' | b'@' | b'\t' | b'\r') => format!("'{text}"),
+        _ => text,
+    }
+}
+
+fn build_row_data(rows: &[DocOutput], escape_formulas: bool) -> (Vec<String>, Vec<Vec<String>>) {
+    let escape = |text: String| {
+        if escape_formulas {
+            escape_formula_cell(text)
+        } else {
+            text
+        }
+    };
+
     let field_names = collect_field_names(rows);
+    // Headers are fireql-generated (`id`, `path`, `data.{field}`); the prefix
+    // keeps them outside CSV formula-injection rules, unlike document values.
     let mut header = vec!["id".to_string(), "path".to_string()];
     header.extend(field_names.iter().map(|f| format!("data.{f}")));
 
     let data_rows: Vec<Vec<String>> = rows
         .iter()
         .map(|row| {
-            let mut record = vec![row.id.clone(), row.path.clone()];
+            let mut record = vec![escape(row.id.clone()), escape(row.path.clone())];
             for field in &field_names {
-                let value = row
-                    .data
-                    .get(field)
-                    .map(|v| v.to_plain_string())
-                    .unwrap_or_default();
-                record.push(value);
+                let cell = match row.data.get(field) {
+                    Some(v @ (FireqlValue::String(_) | FireqlValue::Reference(_))) => {
+                        escape(v.to_plain_string())
+                    }
+                    Some(v) => v.to_plain_string(),
+                    None => String::new(),
+                };
+                record.push(cell);
             }
             record
         })
@@ -67,7 +94,7 @@ fn format_csv(output: &FireqlOutput) -> Result<String> {
             if rows.is_empty() {
                 return Ok(String::new());
             }
-            let (header, data_rows) = build_row_data(rows);
+            let (header, data_rows) = build_row_data(rows, true);
             wtr.write_record(&header).map_err(csv_error)?;
             for record in &data_rows {
                 wtr.write_record(record).map_err(csv_error)?;
@@ -101,6 +128,17 @@ fn csv_error(e: csv::Error) -> crate::error::FireqlError {
     crate::error::FireqlError::Format(e.to_string())
 }
 
+/// Firestore strings may embed ANSI/OSC escape sequences that rewrite the
+/// operator's terminal when rendered. Table output is display-only, so drop
+/// control characters (keeping newline and tab, which comfy-table renders
+/// safely) before drawing. JSON already escapes them and CSV must stay
+/// byte-faithful for machine consumers.
+fn strip_control_chars(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
+}
+
 fn format_table(output: &FireqlOutput) -> Result<String> {
     use comfy_table::presets::ASCII_FULL;
     use comfy_table::{ContentArrangement, Table};
@@ -110,14 +148,14 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
             if rows.is_empty() {
                 return Ok(String::new());
             }
-            let (header, data_rows) = build_row_data(rows);
+            let (header, data_rows) = build_row_data(rows, false);
 
             let mut table = Table::new();
             table.load_preset(ASCII_FULL);
             table.set_content_arrangement(ContentArrangement::Dynamic);
-            table.set_header(&header);
+            table.set_header(header.iter().map(|h| strip_control_chars(h)));
             for cells in data_rows {
-                table.add_row(cells);
+                table.add_row(cells.iter().map(|c| strip_control_chars(c)));
             }
             Ok(table.to_string())
         }
@@ -138,8 +176,11 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
             let mut table = Table::new();
             table.load_preset(ASCII_FULL);
             table.set_content_arrangement(ContentArrangement::Dynamic);
-            table.set_header(keys.iter().map(|k| k.as_str()));
-            let values: Vec<String> = keys.iter().map(|k| map[*k].to_plain_string()).collect();
+            table.set_header(keys.iter().map(|k| strip_control_chars(k)));
+            let values: Vec<String> = keys
+                .iter()
+                .map(|k| strip_control_chars(&map[*k].to_plain_string()))
+                .collect();
             table.add_row(values);
             Ok(table.to_string())
         }
@@ -452,5 +493,72 @@ mod tests {
         let result = Format::Table.format(&output, false).unwrap();
         assert!(result.contains("data.age"));
         assert!(result.contains("data.name"));
+    }
+
+    #[test]
+    fn csv_string_formula_cell_is_escaped() {
+        let mut data = HashMap::new();
+        data.insert(
+            "note".to_string(),
+            FireqlValue::String("=HYPERLINK(\"http://evil\")".to_string()),
+        );
+        let output = FireqlOutput::Rows(vec![DocOutput {
+            id: "d1".to_string(),
+            path: "c/d1".to_string(),
+            data,
+        }]);
+        let result = Format::Csv.format(&output, false).unwrap();
+        let mut rdr = csv::Reader::from_reader(result.as_bytes());
+        let record = rdr.records().next().unwrap().unwrap();
+        assert_eq!(record.get(2).unwrap(), "'=HYPERLINK(\"http://evil\")");
+    }
+
+    #[test]
+    fn csv_negative_integer_is_not_escaped() {
+        let mut data = HashMap::new();
+        data.insert("delta".to_string(), FireqlValue::Integer(-5));
+        let output = FireqlOutput::Rows(vec![DocOutput {
+            id: "d1".to_string(),
+            path: "c/d1".to_string(),
+            data,
+        }]);
+        let result = Format::Csv.format(&output, false).unwrap();
+        let lines: Vec<&str> = result.trim().lines().collect();
+        assert_eq!(lines[1], "d1,c/d1,-5");
+    }
+
+    #[test]
+    fn table_formula_cell_is_not_escaped() {
+        let mut data = HashMap::new();
+        data.insert(
+            "note".to_string(),
+            FireqlValue::String("=SUM(A1)".to_string()),
+        );
+        let output = FireqlOutput::Rows(vec![DocOutput {
+            id: "d1".to_string(),
+            path: "c/d1".to_string(),
+            data,
+        }]);
+        let result = Format::Table.format(&output, false).unwrap();
+        assert!(result.contains("=SUM(A1)"));
+        assert!(!result.contains("'=SUM(A1)"));
+    }
+
+    #[test]
+    fn table_control_chars_are_stripped() {
+        let mut data = HashMap::new();
+        data.insert(
+            "note".to_string(),
+            FireqlValue::String("\u{1b}]8;;http://evil\u{7}click me".to_string()),
+        );
+        let output = FireqlOutput::Rows(vec![DocOutput {
+            id: "d1".to_string(),
+            path: "c/d1".to_string(),
+            data,
+        }]);
+        let result = Format::Table.format(&output, false).unwrap();
+        assert!(!result.contains('\u{1b}'));
+        assert!(!result.contains('\u{7}'));
+        assert!(result.contains("click me"));
     }
 }

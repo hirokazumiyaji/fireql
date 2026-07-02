@@ -90,6 +90,10 @@ println!("{}", serde_json::to_string_pretty(&output)?);
 
 ## Output Format
 
+The CLI supports `--format json|csv|table`.
+
+> In CSV output, string cells starting with `=` `+` `-` `@` are prefixed with `'` to prevent formula execution (CSV injection) in spreadsheet apps.
+
 All values are serialized with a `_firestore_type` tag, including primitive types (null, bool, int, double, string).
 
 ```json

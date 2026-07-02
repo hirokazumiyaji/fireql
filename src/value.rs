@@ -20,41 +20,41 @@ pub enum FireqlValue {
 }
 
 impl FireqlValue {
-    pub(crate) fn from_proto(value: &Value) -> Self {
-        match &value.value_type {
+    pub(crate) fn from_proto(value: Value) -> Self {
+        match value.value_type {
             None | Some(ValueType::NullValue(_)) => Self::Null,
-            Some(ValueType::BooleanValue(b)) => Self::Boolean(*b),
-            Some(ValueType::IntegerValue(i)) => Self::Integer(*i),
-            Some(ValueType::DoubleValue(d)) => Self::Double(*d),
+            Some(ValueType::BooleanValue(b)) => Self::Boolean(b),
+            Some(ValueType::IntegerValue(i)) => Self::Integer(i),
+            Some(ValueType::DoubleValue(d)) => Self::Double(d),
             Some(ValueType::TimestampValue(ts)) => {
                 let dt = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
                     .unwrap_or_default();
                 Self::Timestamp(dt)
             }
-            Some(ValueType::StringValue(s)) => Self::String(s.clone()),
-            Some(ValueType::BytesValue(b)) => Self::Bytes(b.clone()),
-            Some(ValueType::ReferenceValue(r)) => Self::Reference(r.clone()),
+            Some(ValueType::StringValue(s)) => Self::String(s),
+            Some(ValueType::BytesValue(b)) => Self::Bytes(b),
+            Some(ValueType::ReferenceValue(r)) => Self::Reference(r),
             Some(ValueType::GeoPointValue(g)) => Self::GeoPoint {
                 latitude: g.latitude,
                 longitude: g.longitude,
             },
             Some(ValueType::ArrayValue(arr)) => {
-                Self::Array(arr.values.iter().map(Self::from_proto).collect())
+                Self::Array(arr.values.into_iter().map(Self::from_proto).collect())
             }
             Some(ValueType::MapValue(map)) => Self::Map(
                 map.fields
-                    .iter()
-                    .map(|(k, v)| (k.clone(), Self::from_proto(v)))
+                    .into_iter()
+                    .map(|(k, v)| (k, Self::from_proto(v)))
                     .collect(),
             ),
             _ => Self::Null,
         }
     }
 
-    pub(crate) fn from_document_fields(fields: &HashMap<String, Value>) -> HashMap<String, Self> {
+    pub(crate) fn from_document_fields(fields: HashMap<String, Value>) -> HashMap<String, Self> {
         fields
-            .iter()
-            .map(|(k, v)| (k.clone(), Self::from_proto(v)))
+            .into_iter()
+            .map(|(k, v)| (k, Self::from_proto(v)))
             .collect()
     }
 
@@ -100,51 +100,17 @@ impl Serialize for FireqlValue {
                 map.serialize_entry("_firestore_type", "null")?;
                 map.end()
             }
-            Self::Boolean(b) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "boolean")?;
-                map.serialize_entry("value", b)?;
-                map.end()
-            }
-            Self::Integer(i) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "integer")?;
-                map.serialize_entry("value", i)?;
-                map.end()
-            }
-            Self::Double(d) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "double")?;
-                map.serialize_entry("value", d)?;
-                map.end()
-            }
-            Self::String(s) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "string")?;
-                map.serialize_entry("value", s)?;
-                map.end()
-            }
-            Self::Timestamp(dt) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "timestamp")?;
-                map.serialize_entry(
-                    "value",
-                    &dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
-                )?;
-                map.end()
-            }
-            Self::Bytes(b) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "bytes")?;
-                map.serialize_entry("value", b)?;
-                map.end()
-            }
-            Self::Reference(r) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "reference")?;
-                map.serialize_entry("value", to_relative_path(r))?;
-                map.end()
-            }
+            Self::Boolean(b) => typed_entry(serializer, "boolean", b),
+            Self::Integer(i) => typed_entry(serializer, "integer", i),
+            Self::Double(d) => typed_entry(serializer, "double", d),
+            Self::String(s) => typed_entry(serializer, "string", s),
+            Self::Timestamp(dt) => typed_entry(
+                serializer,
+                "timestamp",
+                &dt.to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true),
+            ),
+            Self::Bytes(b) => typed_entry(serializer, "bytes", b),
+            Self::Reference(r) => typed_entry(serializer, "reference", to_relative_path(r)),
             Self::GeoPoint {
                 latitude,
                 longitude,
@@ -155,20 +121,21 @@ impl Serialize for FireqlValue {
                 map.serialize_entry("longitude", longitude)?;
                 map.end()
             }
-            Self::Array(arr) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "array")?;
-                map.serialize_entry("value", &TypedArray(arr))?;
-                map.end()
-            }
-            Self::Map(inner) => {
-                let mut map = serializer.serialize_map(Some(2))?;
-                map.serialize_entry("_firestore_type", "map")?;
-                map.serialize_entry("value", inner)?;
-                map.end()
-            }
+            Self::Array(arr) => typed_entry(serializer, "array", &TypedArray(arr)),
+            Self::Map(inner) => typed_entry(serializer, "map", inner),
         }
     }
+}
+
+fn typed_entry<S: Serializer, T: Serialize + ?Sized>(
+    serializer: S,
+    type_name: &str,
+    value: &T,
+) -> Result<S::Ok, S::Error> {
+    let mut map = serializer.serialize_map(Some(2))?;
+    map.serialize_entry("_firestore_type", type_name)?;
+    map.serialize_entry("value", value)?;
+    map.end()
 }
 
 fn plain_json_value(v: &FireqlValue) -> serde_json::Value {

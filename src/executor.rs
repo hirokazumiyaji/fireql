@@ -15,7 +15,7 @@ use firestore::{
     firestore_document_from_map, FirestoreAggregatedQuerySupport, FirestoreDb,
     FirestoreQuerySupport,
 };
-use futures::stream::{self, StreamExt};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use gcloud_sdk::google::firestore::v1::{
     document_transform, precondition, write, Document, DocumentMask, Precondition, Write,
 };
@@ -25,7 +25,20 @@ use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 
 const BATCH_LIMIT: usize = 500;
-const FIRESTORE_IN_LIMIT: usize = 10;
+// Firestore allows up to 30 disjunctions in an `in` filter; keep in sync
+// with MAX_IN_VALUES in planner.rs.
+const FIRESTORE_IN_LIMIT: usize = 30;
+
+/// Split owned items into `BATCH_LIMIT`-sized batches, moving each item into
+/// its batch rather than cloning.
+fn into_batches<T>(items: Vec<T>) -> Vec<Vec<T>> {
+    let mut batches = Vec::new();
+    let mut iter = items.into_iter().peekable();
+    while iter.peek().is_some() {
+        batches.push(iter.by_ref().take(BATCH_LIMIT).collect());
+    }
+    batches
+}
 
 struct FireqlWrite(Write);
 
@@ -98,7 +111,7 @@ async fn execute_select(
             )?;
 
             let docs = db.query_doc(params).await?;
-            Ok(FireqlOutput::Rows(docs_to_output(&docs)?))
+            Ok(FireqlOutput::Rows(docs_to_output(docs)?))
         }
         SelectProjection::Aggregations(aggregations) => {
             let params = build_aggregated_query_params(
@@ -113,7 +126,7 @@ async fn execute_select(
             let data = docs
                 .into_iter()
                 .next()
-                .map(|doc| FireqlValue::from_document_fields(&doc.fields))
+                .map(|doc| FireqlValue::from_document_fields(doc.fields))
                 .unwrap_or_default();
             Ok(FireqlOutput::Aggregation(data))
         }
@@ -218,7 +231,7 @@ async fn execute_join_select(
         Some(db.get_documents_path().as_str()),
     )?;
     let left_docs_raw = db.query_doc(left_params).await?;
-    let left_docs = docs_to_output(&left_docs_raw)?;
+    let left_docs = docs_to_output(left_docs_raw)?;
 
     let mut current_result = left_docs;
     let mut is_joined = false;
@@ -280,7 +293,7 @@ async fn execute_join_select(
             )?;
 
             let chunk_docs = db.query_doc(right_params).await?;
-            right_docs.extend(docs_to_output(&chunk_docs)?);
+            right_docs.extend(docs_to_output(chunk_docs)?);
         }
 
         let right_prefix = join
@@ -365,14 +378,8 @@ async fn execute_insert_select(
         return Ok(FireqlOutput::Affected { affected: 0 });
     }
 
-    let chunks = docs
-        .chunks(BATCH_LIMIT)
-        .map(|chunk| chunk.to_vec())
-        .collect::<Vec<_>>();
-    let mut affected = 0u64;
-    let mut first_error: Option<String> = None;
-
-    let mut stream = stream::iter(chunks.into_iter().map(|chunk| {
+    let chunks = into_batches(docs);
+    let stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
         let collection = stmt.collection.clone();
         let columns = stmt.columns.clone();
@@ -381,8 +388,9 @@ async fn execute_insert_select(
             let parent = insert_parent_path(&db, &collection);
             let writer = db.create_simple_batch_writer().await?;
             let mut batch = writer.new_batch();
+            let chunk_len = chunk.len();
 
-            for doc in &chunk {
+            for doc in chunk {
                 let parts = build_insert_select_parts(doc, columns.as_deref(), &projection)?;
                 let id = parts.id.unwrap_or_else(generate_document_id);
                 let doc_path = format!("{parent}/{}/{}", collection.collection_id, id);
@@ -400,33 +408,13 @@ async fn execute_insert_select(
             let response = batch.write().await?;
             Ok::<(usize, Option<String>), FireqlError>(count_batch_outcome(
                 &response.statuses,
-                chunk.len(),
+                chunk_len,
             ))
         }
     }))
     .buffer_unordered(batch_parallelism);
 
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok((count, write_error)) => {
-                affected += count as u64;
-                if first_error.is_none() {
-                    first_error = write_error;
-                }
-            }
-            Err(err) => {
-                if first_error.is_none() {
-                    first_error = Some(err.to_string());
-                }
-            }
-        }
-    }
-
-    if let Some(error) = first_error {
-        return Err(FireqlError::PartialFailure { affected, error });
-    }
-
-    Ok(FireqlOutput::Affected { affected })
+    drain_batch_results(stream).await
 }
 
 fn insert_select_query_projection(projection: &Projection) -> Option<Projection> {
@@ -460,7 +448,7 @@ struct InsertSelectParts {
 }
 
 fn build_insert_select_parts(
-    doc: &Document,
+    doc: Document,
     columns: Option<&[String]>,
     projection: &Projection,
 ) -> Result<InsertSelectParts> {
@@ -469,13 +457,8 @@ fn build_insert_select_parts(
             id: None,
             fields: doc
                 .fields
-                .iter()
-                .map(|(field, value)| {
-                    (
-                        field.clone(),
-                        firestore::FirestoreValue::from(value.clone()),
-                    )
-                })
+                .into_iter()
+                .map(|(field, value)| (field, firestore::FirestoreValue::from(value)))
                 .collect(),
         }),
         (Some(columns), Projection::Fields(source_fields)) => {
@@ -540,6 +523,40 @@ fn count_batch_outcome(statuses: &[Status], chunk_len: usize) -> (usize, Option<
     (chunk_len.saturating_sub(failures), first_error)
 }
 
+/// Drains a `buffer_unordered` stream of per-chunk write results, summing the
+/// succeeded count and keeping only the first error. Any error downgrades the
+/// whole statement to `PartialFailure` so callers never see a partial success
+/// reported as a full success.
+async fn drain_batch_results(
+    mut stream: impl futures::Stream<Item = std::result::Result<(usize, Option<String>), FireqlError>>
+        + Unpin,
+) -> Result<FireqlOutput> {
+    let mut affected = 0u64;
+    let mut first_error: Option<String> = None;
+
+    while let Some(result) = stream.next().await {
+        match result {
+            Ok((count, write_error)) => {
+                affected += count as u64;
+                if first_error.is_none() {
+                    first_error = write_error;
+                }
+            }
+            Err(err) => {
+                if first_error.is_none() {
+                    first_error = Some(err.to_string());
+                }
+            }
+        }
+    }
+
+    if let Some(error) = first_error {
+        return Err(FireqlError::PartialFailure { affected, error });
+    }
+
+    Ok(FireqlOutput::Affected { affected })
+}
+
 async fn execute_batch_write(
     db: &FirestoreDb,
     collection: &CollectionSpec,
@@ -558,20 +575,17 @@ async fn execute_batch_write(
         Some(db.get_documents_path().as_str()),
     )?;
 
-    // NOTE: All matching documents are loaded into memory before batching.
-    // For large result sets, callers should use LIMIT to bound memory usage.
-    let docs = db.query_doc(params).await?;
-    let doc_names: Vec<String> = docs.into_iter().map(|doc| doc.name).collect();
+    // Stream the query so only document names are kept in memory; the full
+    // document bodies are dropped as each result arrives.
+    let doc_names: Vec<String> = db
+        .stream_query_doc_with_errors(params)
+        .await?
+        .map_ok(|doc| doc.name)
+        .try_collect()
+        .await?;
 
-    let chunks = doc_names
-        .chunks(BATCH_LIMIT)
-        .map(|chunk| chunk.to_vec())
-        .collect::<Vec<_>>();
-
-    let mut affected = 0u64;
-    let mut first_error: Option<String> = None;
-
-    let mut stream = stream::iter(chunks.into_iter().map(|chunk| {
+    let chunks = into_batches(doc_names);
+    let stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
         let op = op.clone();
         async move {
@@ -608,27 +622,7 @@ async fn execute_batch_write(
     }))
     .buffer_unordered(batch_parallelism);
 
-    while let Some(result) = stream.next().await {
-        match result {
-            Ok((count, write_error)) => {
-                affected += count as u64;
-                if first_error.is_none() {
-                    first_error = write_error;
-                }
-            }
-            Err(err) => {
-                if first_error.is_none() {
-                    first_error = Some(err.to_string());
-                }
-            }
-        }
-    }
-
-    if let Some(error) = first_error {
-        return Err(FireqlError::PartialFailure { affected, error });
-    }
-
-    Ok(FireqlOutput::Affected { affected })
+    drain_batch_results(stream).await
 }
 
 #[derive(Clone)]
@@ -678,13 +672,15 @@ fn is_current_timestamp_value(value: &JsonValue) -> bool {
     }
 }
 
-fn docs_to_output(docs: &[gcloud_sdk::google::firestore::v1::Document]) -> Result<Vec<DocOutput>> {
-    docs.iter().map(doc_to_output).collect()
+fn docs_to_output(
+    docs: Vec<gcloud_sdk::google::firestore::v1::Document>,
+) -> Result<Vec<DocOutput>> {
+    docs.into_iter().map(doc_to_output).collect()
 }
 
-fn doc_to_output(doc: &gcloud_sdk::google::firestore::v1::Document) -> Result<DocOutput> {
+fn doc_to_output(doc: gcloud_sdk::google::firestore::v1::Document) -> Result<DocOutput> {
     let parts = parse_doc_name(&doc.name)?;
-    let data = FireqlValue::from_document_fields(&doc.fields);
+    let data = FireqlValue::from_document_fields(doc.fields);
 
     Ok(DocOutput {
         id: parts.id,
@@ -843,7 +839,7 @@ mod tests {
             ],
         );
 
-        let parts = build_insert_select_parts(&doc, None, &Projection::All).expect("parts");
+        let parts = build_insert_select_parts(doc, None, &Projection::All).expect("parts");
 
         assert!(parts.id.is_none());
         assert_eq!(parts.fields.len(), 2);
@@ -866,7 +862,7 @@ mod tests {
         let source_fields = vec!["__name__".to_string(), "name".to_string()];
 
         let parts =
-            build_insert_select_parts(&doc, Some(&columns), &Projection::Fields(source_fields))
+            build_insert_select_parts(doc, Some(&columns), &Projection::Fields(source_fields))
                 .expect("parts");
 
         assert_eq!(parts.id.as_deref(), Some("u1"));
@@ -888,7 +884,7 @@ mod tests {
         let source_fields = vec!["name".to_string()];
 
         let parts =
-            build_insert_select_parts(&doc, Some(&columns), &Projection::Fields(source_fields))
+            build_insert_select_parts(doc, Some(&columns), &Projection::Fields(source_fields))
                 .expect("parts");
 
         assert!(parts.id.is_none());
@@ -983,5 +979,32 @@ mod tests {
         let (succeeded, err) = count_batch_outcome(&[], 5);
         assert_eq!(succeeded, 5);
         assert!(err.is_none());
+    }
+
+    #[tokio::test]
+    async fn drain_batch_results_sums_affected_on_success() {
+        let stream = stream::iter(vec![Ok::<_, FireqlError>((2, None)), Ok((3, None))]);
+        let output = drain_batch_results(stream).await.unwrap();
+        match output {
+            FireqlOutput::Affected { affected } => assert_eq!(affected, 5),
+            other => panic!("expected affected output, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_batch_results_reports_first_error_as_partial_failure() {
+        let stream = stream::iter(vec![
+            Ok::<_, FireqlError>((2, None)),
+            Ok((1, Some("boom".to_string()))),
+            Err(FireqlError::Format("io".to_string())),
+        ]);
+        let err = drain_batch_results(stream).await.unwrap_err();
+        match err {
+            FireqlError::PartialFailure { affected, error } => {
+                assert_eq!(affected, 3);
+                assert_eq!(error, "boom");
+            }
+            other => panic!("expected partial failure, got {other:?}"),
+        }
     }
 }
