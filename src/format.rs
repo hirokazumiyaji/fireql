@@ -124,6 +124,17 @@ fn csv_error(e: csv::Error) -> crate::error::FireqlError {
     crate::error::FireqlError::Format(e.to_string())
 }
 
+/// Firestore strings may embed ANSI/OSC escape sequences that rewrite the
+/// operator's terminal when rendered. Table output is display-only, so drop
+/// control characters (keeping newline and tab, which comfy-table renders
+/// safely) before drawing. JSON already escapes them and CSV must stay
+/// byte-faithful for machine consumers.
+fn strip_control_chars(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control() || matches!(c, '\n' | '\t'))
+        .collect()
+}
+
 fn format_table(output: &FireqlOutput) -> Result<String> {
     use comfy_table::presets::ASCII_FULL;
     use comfy_table::{ContentArrangement, Table};
@@ -138,9 +149,9 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
             let mut table = Table::new();
             table.load_preset(ASCII_FULL);
             table.set_content_arrangement(ContentArrangement::Dynamic);
-            table.set_header(&header);
+            table.set_header(header.iter().map(|h| strip_control_chars(h)));
             for cells in data_rows {
-                table.add_row(cells);
+                table.add_row(cells.iter().map(|c| strip_control_chars(c)));
             }
             Ok(table.to_string())
         }
@@ -161,8 +172,11 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
             let mut table = Table::new();
             table.load_preset(ASCII_FULL);
             table.set_content_arrangement(ContentArrangement::Dynamic);
-            table.set_header(keys.iter().map(|k| k.as_str()));
-            let values: Vec<String> = keys.iter().map(|k| map[*k].to_plain_string()).collect();
+            table.set_header(keys.iter().map(|k| strip_control_chars(k)));
+            let values: Vec<String> = keys
+                .iter()
+                .map(|k| strip_control_chars(&map[*k].to_plain_string()))
+                .collect();
             table.add_row(values);
             Ok(table.to_string())
         }
@@ -524,5 +538,23 @@ mod tests {
         let result = Format::Table.format(&output, false).unwrap();
         assert!(result.contains("=SUM(A1)"));
         assert!(!result.contains("'=SUM(A1)"));
+    }
+
+    #[test]
+    fn table_control_chars_are_stripped() {
+        let mut data = HashMap::new();
+        data.insert(
+            "note".to_string(),
+            FireqlValue::String("\u{1b}]8;;http://evil\u{7}click me".to_string()),
+        );
+        let output = FireqlOutput::Rows(vec![DocOutput {
+            id: "d1".to_string(),
+            path: "c/d1".to_string(),
+            data,
+        }]);
+        let result = Format::Table.format(&output, false).unwrap();
+        assert!(!result.contains('\u{1b}'));
+        assert!(!result.contains('\u{7}'));
+        assert!(result.contains("click me"));
     }
 }
