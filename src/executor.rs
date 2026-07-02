@@ -29,6 +29,17 @@ const BATCH_LIMIT: usize = 500;
 // with MAX_IN_VALUES in planner.rs.
 const FIRESTORE_IN_LIMIT: usize = 30;
 
+/// Split owned items into `BATCH_LIMIT`-sized batches, moving each item into
+/// its batch rather than cloning.
+fn into_batches<T>(items: Vec<T>) -> Vec<Vec<T>> {
+    let mut batches = Vec::new();
+    let mut iter = items.into_iter().peekable();
+    while iter.peek().is_some() {
+        batches.push(iter.by_ref().take(BATCH_LIMIT).collect());
+    }
+    batches
+}
+
 struct FireqlWrite(Write);
 
 impl TryInto<Write> for FireqlWrite {
@@ -367,11 +378,7 @@ async fn execute_insert_select(
         return Ok(FireqlOutput::Affected { affected: 0 });
     }
 
-    let mut chunks: Vec<Vec<Document>> = Vec::new();
-    let mut doc_iter = docs.into_iter().peekable();
-    while doc_iter.peek().is_some() {
-        chunks.push(doc_iter.by_ref().take(BATCH_LIMIT).collect());
-    }
+    let chunks = into_batches(docs);
     let stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
         let collection = stmt.collection.clone();
@@ -577,11 +584,7 @@ async fn execute_batch_write(
         .try_collect()
         .await?;
 
-    let chunks = doc_names
-        .chunks(BATCH_LIMIT)
-        .map(|chunk| chunk.to_vec())
-        .collect::<Vec<_>>();
-
+    let chunks = into_batches(doc_names);
     let stream = stream::iter(chunks.into_iter().map(|chunk| {
         let db = db.clone();
         let op = op.clone();

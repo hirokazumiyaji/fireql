@@ -38,9 +38,11 @@ fn collect_field_names(rows: &[DocOutput]) -> Vec<String> {
 
 /// Spreadsheet apps execute cells starting with '=', '+', '-', '@', TAB or CR
 /// as formulas, so exported CSV can trigger code execution when opened
-/// (CSV injection). Only string-typed cells are escaped: numeric, bytes, and
-/// JSON-encoded cells must stay machine-readable and their leading characters
-/// are produced by fireql itself, not by document authors.
+/// (CSV injection). Only string and reference cells are escaped, since they
+/// carry arbitrary author text. Numeric and JSON-encoded cells have
+/// fireql-controlled leading characters, and base64 bytes stay unescaped to
+/// remain round-trippable: a leading '+' only yields a harmless `#NAME?` cell
+/// because the base64 alphabet cannot form an executable formula payload.
 fn escape_formula_cell(text: String) -> String {
     match text.as_bytes().first() {
         Some(b'=' | b'+' | b'-' | b'@' | b'\t' | b'\r') => format!("'{text}"),
@@ -58,8 +60,10 @@ fn build_row_data(rows: &[DocOutput], escape_formulas: bool) -> (Vec<String>, Ve
     };
 
     let field_names = collect_field_names(rows);
-    let mut header = vec![escape("id".to_string()), escape("path".to_string())];
-    header.extend(field_names.iter().map(|f| escape(format!("data.{f}"))));
+    // Headers are fireql-generated (`id`, `path`, `data.{field}`); the prefix
+    // keeps them outside CSV formula-injection rules, unlike document values.
+    let mut header = vec!["id".to_string(), "path".to_string()];
+    header.extend(field_names.iter().map(|f| format!("data.{f}")));
 
     let data_rows: Vec<Vec<String>> = rows
         .iter()
