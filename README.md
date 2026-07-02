@@ -90,6 +90,10 @@ println!("{}", serde_json::to_string_pretty(&output)?);
 
 ## 出力形式
 
+CLI では `--format json|csv|table` で出力形式を選択できます。
+
+> CSV 出力では、`=` `+` `-` `@` などで始まる文字列セルに `'` を前置してスプレッドシートでの数式実行(CSV injection)を防ぎます。
+
 すべての値は `_firestore_type` タグ付きで JSON 出力されます。プリミティブ型（null, bool, int, double, string）も同様です。
 
 ```json
