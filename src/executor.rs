@@ -237,8 +237,7 @@ async fn execute_join_select(
     for join in joins {
         let effective_left_field = effective_left_join_field(join, is_joined, left_alias)?;
 
-        let keys = extract_join_keys(&current_result, &effective_left_field)
-            .map_err(FireqlError::Unsupported)?;
+        let keys = extract_join_keys(&current_result, &effective_left_field)?;
         if keys.is_empty() && join.join_type == crate::sql::JoinType::Inner {
             return Ok(FireqlOutput::Rows(vec![]));
         }
@@ -313,8 +312,7 @@ async fn execute_join_select(
                 right_prefix,
                 prefix_left: !is_joined,
             },
-        )
-        .map_err(FireqlError::Unsupported)?;
+        )?;
 
         is_joined = true;
     }

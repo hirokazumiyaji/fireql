@@ -14,6 +14,8 @@ pub enum FireqlError {
     InvalidConfig(String),
     #[error("Invalid query: {0}")]
     InvalidQuery(String),
+    #[error("Cannot join on field `{field}`: {reason}")]
+    UnsupportedJoinKey { field: String, reason: String },
     #[error("Partial failure after {affected} writes: {error}")]
     PartialFailure { affected: u64, error: String },
     #[error("Firestore error: {0}")]
