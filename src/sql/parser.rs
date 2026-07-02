@@ -59,12 +59,14 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
                 .transpose()?
                 .ok_or(FireqlError::MissingWhere)?;
             let assignments = parse_assignments(update.assignments)?;
+            let (order_by, limit) =
+                parse_order_and_limit_from_query_parts(Some(update.order_by), update.limit)?;
             Ok(StatementAst::Update(UpdateStatement {
                 collection,
                 assignments,
                 filter,
-                order_by: vec![],
-                limit: None,
+                order_by,
+                limit,
             }))
         }
         Statement::Delete(delete) => {

@@ -45,6 +45,21 @@ fn update_requires_where() {
 }
 
 #[test]
+fn parse_update_with_order_by_and_limit() {
+    let stmt = parse_sql("UPDATE users SET status = 'active' WHERE age >= 18 ORDER BY age LIMIT 5")
+        .unwrap();
+    match stmt {
+        StatementAst::Update(update) => {
+            assert_eq!(update.order_by.len(), 1);
+            assert_eq!(update.order_by[0].field, "age");
+            assert!(matches!(update.order_by[0].direction, OrderDirection::Asc));
+            assert_eq!(update.limit, Some(5));
+        }
+        _ => panic!("expected update"),
+    }
+}
+
+#[test]
 fn delete_collection_group_requires_where() {
     let err = parse_sql("DELETE FROM collection_group('logs')").unwrap_err();
     assert!(matches!(err, FireqlError::MissingWhere));
