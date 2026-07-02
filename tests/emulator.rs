@@ -114,10 +114,8 @@ async fn emulator_update_order_by_limit() -> Result<(), Box<dyn std::error::Erro
         other => panic!("expected affected, got {other:?}"),
     }
 
-    let done_sql = format!(
-        "SELECT __name__, priority FROM {collection} \
-         WHERE status = 'done' ORDER BY priority DESC"
-    );
+    let done_sql =
+        format!("SELECT priority FROM {collection} WHERE status = 'done' ORDER BY priority DESC");
     let output = fireql.execute(&done_sql).await?;
     match output {
         FireqlOutput::Rows(rows) => {
@@ -134,10 +132,8 @@ async fn emulator_update_order_by_limit() -> Result<(), Box<dyn std::error::Erro
         other => panic!("expected rows, got {other:?}"),
     }
 
-    let pending_sql = format!(
-        "SELECT __name__, priority FROM {collection} \
-         WHERE status = 'pending' ORDER BY priority ASC"
-    );
+    let pending_sql =
+        format!("SELECT priority FROM {collection} WHERE status = 'pending' ORDER BY priority ASC");
     let output = fireql.execute(&pending_sql).await?;
     match output {
         FireqlOutput::Rows(rows) => {
