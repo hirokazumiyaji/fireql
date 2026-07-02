@@ -25,7 +25,9 @@ use serde_json::Value as JsonValue;
 use std::collections::HashSet;
 
 const BATCH_LIMIT: usize = 500;
-const FIRESTORE_IN_LIMIT: usize = 10;
+// Firestore allows up to 30 disjunctions in an `in` filter; keep in sync
+// with MAX_IN_VALUES in planner.rs.
+const FIRESTORE_IN_LIMIT: usize = 30;
 
 struct FireqlWrite(Write);
 
