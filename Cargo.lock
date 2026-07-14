@@ -525,7 +525,7 @@ dependencies = [
  "firestore",
  "futures",
  "gcloud-sdk",
- "rand 0.10.1",
+ "rand 0.10.2",
  "rustls",
  "serde",
  "serde_json",
@@ -547,7 +547,7 @@ dependencies = [
  "gcloud-sdk",
  "hex",
  "hyper",
- "rand 0.10.1",
+ "rand 0.10.2",
  "rsb_derive",
  "rvstruct",
  "serde",
@@ -1594,9 +1594,9 @@ dependencies = [
 
 [[package]]
 name = "rand"
-version = "0.10.1"
+version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2e8e8bcc7961af1fdac401278c6a831614941f6164ee3bf4ce61b7edb162207"
+checksum = "c7f5fa3a058cd35567ef9bfa5e75732bee0f9e4c55fa90477bef2dfcdbc4be80"
 dependencies = [
  "chacha20",
  "getrandom 0.4.2",
@@ -1774,9 +1774,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.41"
+version = "0.23.42"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6b92b125634d9b795e7beca796cc790df15a7fb38323bf3196fda83292d06b1f"
+checksum = "3c54fcab019b409d04215d3a17cb438fd7fbf192ee61461f20f4fe18704bc138"
 dependencies = [
  "aws-lc-rs",
  "log",
