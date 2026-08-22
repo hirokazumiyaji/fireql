@@ -149,6 +149,13 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
     use comfy_table::presets::ASCII_FULL;
     use comfy_table::{ContentArrangement, Table};
 
+    let new_table = || {
+        let mut table = Table::new();
+        table.load_preset(ASCII_FULL);
+        table.set_content_arrangement(ContentArrangement::Dynamic);
+        table
+    };
+
     match output {
         FireqlOutput::Rows(rows) => {
             if rows.is_empty() {
@@ -156,9 +163,7 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
             }
             let (header, data_rows) = build_row_data(rows, false);
 
-            let mut table = Table::new();
-            table.load_preset(ASCII_FULL);
-            table.set_content_arrangement(ContentArrangement::Dynamic);
+            let mut table = new_table();
             table.set_header(header.iter().map(|h| strip_control_chars(h)));
             for cells in data_rows {
                 table.add_row(cells.iter().map(|c| strip_control_chars(c)));
@@ -166,9 +171,7 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
             Ok(table.to_string())
         }
         FireqlOutput::Affected { affected } => {
-            let mut table = Table::new();
-            table.load_preset(ASCII_FULL);
-            table.set_content_arrangement(ContentArrangement::Dynamic);
+            let mut table = new_table();
             table.set_header(["affected"]);
             table.add_row([affected.to_string()]);
             Ok(table.to_string())
@@ -178,9 +181,7 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
                 return Ok(String::new());
             }
             let (keys, values) = aggregation_row(map);
-            let mut table = Table::new();
-            table.load_preset(ASCII_FULL);
-            table.set_content_arrangement(ContentArrangement::Dynamic);
+            let mut table = new_table();
             table.set_header(keys.iter().map(|k| strip_control_chars(k)));
             table.add_row(values.iter().map(|v| strip_control_chars(v)));
             Ok(table.to_string())

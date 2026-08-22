@@ -13,13 +13,12 @@ use firestore::{
     FirestoreQueryParams, FirestoreValue,
 };
 use serde::Serialize;
-use std::collections::BTreeSet;
 
 // Firestore disjunction value limits. `in` and `array-contains-any` allow 30,
 // but `not-in` is stricter at 10.
-const MAX_IN_VALUES: usize = 30;
-const MAX_NOT_IN_VALUES: usize = 10;
-const MAX_ARRAY_CONTAINS_ANY_VALUES: usize = 30;
+pub(crate) const MAX_IN_VALUES: usize = 30;
+pub(crate) const MAX_NOT_IN_VALUES: usize = 10;
+pub(crate) const MAX_ARRAY_CONTAINS_ANY_VALUES: usize = 30;
 
 pub fn build_query_params(
     collection: &CollectionSpec,
@@ -132,168 +131,9 @@ fn build_aggregation(agg: &AggregationExpr) -> Result<FirestoreAggregation> {
     })
 }
 
-fn validate_query_constraints(filter: Option<&FilterExpr>, order_by: &[OrderBy]) -> Result<()> {
-    let mut stats = FilterStats::default();
-    if let Some(filter) = filter {
-        collect_filter_stats(filter, &mut stats);
-    }
+mod validate;
 
-    if stats.inequality_fields.len() > 1 {
-        return Err(FireqlError::InvalidQuery(
-            "Firestore allows inequality filters on a single field only".to_string(),
-        ));
-    }
-
-    if let Some(field) = stats.inequality_fields.iter().next() {
-        if !order_by.is_empty() {
-            let first = &order_by[0].field;
-            if first != field {
-                return Err(FireqlError::InvalidQuery(format!(
-                    "When ORDER BY is used with an inequality filter, the first ORDER BY field must match the inequality field: expected `{field}`, got `{first}`"
-                )));
-            }
-        }
-    }
-
-    if stats.in_fields.len() > 1 {
-        return Err(FireqlError::InvalidQuery(
-            "Firestore allows at most one IN filter".to_string(),
-        ));
-    }
-    if stats.in_lengths.contains(&0) {
-        return Err(FireqlError::InvalidQuery(
-            "IN requires at least one value".to_string(),
-        ));
-    }
-    if stats.in_lengths.iter().any(|len| *len > MAX_IN_VALUES) {
-        return Err(FireqlError::InvalidQuery(format!(
-            "IN supports up to {MAX_IN_VALUES} values"
-        )));
-    }
-    if stats.not_in_fields.len() > 1 {
-        return Err(FireqlError::InvalidQuery(
-            "Firestore allows at most one NOT IN filter".to_string(),
-        ));
-    }
-    if stats.not_in_lengths.contains(&0) {
-        return Err(FireqlError::InvalidQuery(
-            "NOT IN requires at least one value".to_string(),
-        ));
-    }
-    if stats
-        .not_in_lengths
-        .iter()
-        .any(|len| *len > MAX_NOT_IN_VALUES)
-    {
-        return Err(FireqlError::InvalidQuery(format!(
-            "NOT IN supports up to {MAX_NOT_IN_VALUES} values"
-        )));
-    }
-    if stats.not_eq_fields.len() > 1 {
-        return Err(FireqlError::InvalidQuery(
-            "Firestore allows at most one != filter".to_string(),
-        ));
-    }
-
-    if !stats.not_in_fields.is_empty()
-        && (!stats.in_fields.is_empty() || !stats.not_eq_fields.is_empty())
-    {
-        return Err(FireqlError::InvalidQuery(
-            "NOT IN cannot be combined with IN or !=".to_string(),
-        ));
-    }
-
-    if stats.array_contains_fields.len() + stats.array_contains_any_fields.len() > 1 {
-        return Err(FireqlError::InvalidQuery(
-            "Firestore allows at most one array-contains / array-contains-any filter".to_string(),
-        ));
-    }
-    if !stats.array_contains_any_fields.is_empty()
-        && (!stats.in_fields.is_empty() || !stats.not_in_fields.is_empty())
-    {
-        return Err(FireqlError::InvalidQuery(
-            "array-contains-any cannot be combined with IN or NOT IN".to_string(),
-        ));
-    }
-    if !stats.not_in_fields.is_empty()
-        && (!stats.array_contains_fields.is_empty() || !stats.array_contains_any_fields.is_empty())
-    {
-        return Err(FireqlError::InvalidQuery(
-            "NOT IN cannot be combined with array-contains filters".to_string(),
-        ));
-    }
-    if stats.array_contains_any_lengths.contains(&0) {
-        return Err(FireqlError::InvalidQuery(
-            "array-contains-any requires at least one value".to_string(),
-        ));
-    }
-    if stats
-        .array_contains_any_lengths
-        .iter()
-        .any(|len| *len > MAX_ARRAY_CONTAINS_ANY_VALUES)
-    {
-        return Err(FireqlError::InvalidQuery(format!(
-            "array-contains-any supports up to {MAX_ARRAY_CONTAINS_ANY_VALUES} values"
-        )));
-    }
-
-    Ok(())
-}
-
-#[derive(Default)]
-struct FilterStats {
-    inequality_fields: BTreeSet<String>,
-    in_fields: Vec<String>,
-    not_in_fields: Vec<String>,
-    not_eq_fields: Vec<String>,
-    in_lengths: Vec<usize>,
-    not_in_lengths: Vec<usize>,
-    array_contains_fields: Vec<String>,
-    array_contains_any_fields: Vec<String>,
-    array_contains_any_lengths: Vec<usize>,
-}
-
-fn collect_filter_stats(filter: &FilterExpr, stats: &mut FilterStats) {
-    match filter {
-        FilterExpr::Compare { field, op, .. } => match op {
-            CompareOp::Lt | CompareOp::LtEq | CompareOp::Gt | CompareOp::GtEq => {
-                stats.inequality_fields.insert(field.clone());
-            }
-            CompareOp::NotEq => {
-                stats.inequality_fields.insert(field.clone());
-                stats.not_eq_fields.push(field.clone());
-            }
-            CompareOp::Eq => {}
-        },
-        FilterExpr::ArrayContains { field, .. } => {
-            stats.array_contains_fields.push(field.clone());
-        }
-        FilterExpr::ArrayContainsAny { field, values } => {
-            stats.array_contains_any_fields.push(field.clone());
-            stats.array_contains_any_lengths.push(values.len());
-        }
-        FilterExpr::InList {
-            field,
-            values,
-            negated,
-        } => {
-            if *negated {
-                stats.inequality_fields.insert(field.clone());
-                stats.not_in_fields.push(field.clone());
-                stats.not_in_lengths.push(values.len());
-            } else {
-                stats.in_fields.push(field.clone());
-                stats.in_lengths.push(values.len());
-            }
-        }
-        FilterExpr::Unary { .. } => {}
-        FilterExpr::And(filters) | FilterExpr::Or(filters) => {
-            for f in filters {
-                collect_filter_stats(f, stats);
-            }
-        }
-    }
-}
+use validate::validate_query_constraints;
 
 pub fn build_filter(
     filter: &FilterExpr,
@@ -563,6 +403,45 @@ mod tests {
         }];
         let err = build_query_params(&collection(), Some(&filter), &order_by, None, None, None)
             .unwrap_err();
+        assert!(matches!(err, FireqlError::InvalidQuery(_)));
+    }
+
+    #[test]
+    fn or_branches_allow_independent_in_filters() {
+        // Each OR branch gets its own disjunction budget, so two IN filters
+        // on different fields are valid when they live in separate branches.
+        let filter = FilterExpr::Or(vec![
+            FilterExpr::InList {
+                field: "status".to_string(),
+                values: vec![SqlValue::Literal(JsonValue::from("a"))],
+                negated: false,
+            },
+            FilterExpr::InList {
+                field: "role".to_string(),
+                values: vec![SqlValue::Literal(JsonValue::from("b"))],
+                negated: false,
+            },
+        ]);
+        let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn multiple_in_in_same_and_still_rejected() {
+        let filter = FilterExpr::And(vec![
+            FilterExpr::InList {
+                field: "status".to_string(),
+                values: vec![SqlValue::Literal(JsonValue::from("a"))],
+                negated: false,
+            },
+            FilterExpr::InList {
+                field: "role".to_string(),
+                values: vec![SqlValue::Literal(JsonValue::from("b"))],
+                negated: false,
+            },
+        ]);
+        let err =
+            build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
