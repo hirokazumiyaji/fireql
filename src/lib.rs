@@ -8,7 +8,7 @@ mod sql;
 mod value;
 
 pub use error::{FireqlError, Result};
-pub use format::Format;
+pub use format::{write_csv_rows, Format};
 pub use output::{DocOutput, FireqlOutput};
 pub use sql::parse_collection_relative_path;
 pub use value::FireqlValue;
