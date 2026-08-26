@@ -238,6 +238,12 @@ SELECT AVG(score) FROM users WHERE active = true;
 { "affected": 5 }
 ```
 
+### CSV / Table
+
+- `--format csv`: ヘッダ列は**先頭行のフィールド**のみ（行ストリーミング可能）。後続行だけが持つフィールドは列に出ません
+- `--format table`: 表示用のため全行のフィールド union をバッファリングします
+- ライブラリから CSV を逐次書き出す場合は `write_csv_rows` を使えます
+
 ## 7. Firestore 制約（実装で検証）
 
 - `UPDATE` / `DELETE` は `WHERE` 必須
