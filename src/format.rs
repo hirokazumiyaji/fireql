@@ -151,7 +151,7 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
 
     let new_table = || {
         let mut table = Table::new();
-        table.load_preset(ASCII_FULL);
+        table.load_style(ASCII_FULL);
         table.set_content_arrangement(ContentArrangement::Dynamic);
         table
     };

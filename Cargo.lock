@@ -567,7 +567,7 @@ dependencies = [
  "csv",
  "firestore",
  "futures",
- "gcloud-sdk 0.31.0",
+ "gcloud-sdk",
  "rand 0.10.2",
  "rustls",
  "serde",
@@ -579,17 +579,17 @@ dependencies = [
 
 [[package]]
 name = "firestore"
-version = "0.49.0"
+version = "0.51.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0694fd7f29eff94f1e398b5985dc35482fd18289245abd29db48a13fba162a81"
+checksum = "46e51660f8e56ffbbcbb524dd7e01612d47680f9bc9e4b5b306ef37e05f894d3"
 dependencies = [
  "async-trait",
  "backoff",
- "chrono",
  "futures",
- "gcloud-sdk 0.30.2",
+ "gcloud-sdk",
  "hex",
  "hyper",
+ "jiff",
  "rand 0.10.2",
  "rsb_derive",
  "rvstruct",
@@ -727,34 +727,6 @@ dependencies = [
 
 [[package]]
 name = "gcloud-sdk"
-version = "0.30.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6199c9b08260f184baff83a5a61efc5533e69624ac5d49a76ef5f6afe0962347"
-dependencies = [
- "async-trait",
- "bytes",
- "chrono",
- "futures",
- "hyper",
- "jsonwebtoken 10.4.0",
- "once_cell",
- "prost",
- "prost-types",
- "reqwest",
- "secret-vault-value",
- "serde",
- "serde_json",
- "tokio",
- "tonic",
- "tonic-prost",
- "tower",
- "tower-layer",
- "tracing",
- "url",
-]
-
-[[package]]
-name = "gcloud-sdk"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae0e5ee4726919531561eadf5b9c560e1f3f7dcb4f6ea05996681d2fb6b7e2c5"
@@ -764,7 +736,7 @@ dependencies = [
  "futures",
  "hyper",
  "jiff",
- "jsonwebtoken 11.0.0",
+ "jsonwebtoken",
  "once_cell",
  "prost",
  "prost-types",
@@ -1275,28 +1247,11 @@ dependencies = [
 
 [[package]]
 name = "jsonwebtoken"
-version = "10.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eba32bfb4ffdeaca3e34431072faf01745c9b26d25504aa7a6cf5684334fc4fc"
-dependencies = [
- "base64 0.22.1",
- "getrandom 0.2.17",
- "js-sys",
- "pem",
- "serde",
- "serde_json",
- "signature",
- "simple_asn1",
- "zeroize",
-]
-
-[[package]]
-name = "jsonwebtoken"
 version = "11.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "881733cbc631fc9e472e24447ce32a64bedf2da498d6d8570b08edc87de71f65"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "getrandom 0.2.17",
  "js-sys",
  "pem",
