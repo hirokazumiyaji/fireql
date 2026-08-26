@@ -255,19 +255,40 @@ SELECT AVG(score) FROM users WHERE active = true;
 
 ## 8. Emulator Tests
 
-Integration tests run only when `FIRESTORE_EMULATOR_HOST` is set.
+`tests/emulator.rs` and `tests/e2e_seed.rs` require the Firestore Emulator.
+When `FIRESTORE_EMULATOR_HOST` is unset, each test skips itself.
+
+CI (`.github/workflows/ci.yml`) starts the emulator and runs `cargo test --all`.
+
+### Local setup
+
+1. Install the toolchain (optional but recommended):
+
+```bash
+mise install   # Rust + Java (Temurin 21). The emulator needs a JVM.
+```
+
+2. Start the Firestore emulator:
+
+```bash
+gcloud components install cloud-firestore-emulator beta
+gcloud beta emulators firestore start --host-port=localhost:8080
+```
+
+3. In another terminal, set the same env vars CI uses and run tests:
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
-export FIRESTORE_PROJECT_ID=demo-fireql
-cargo test
+export FIRESTORE_PROJECT_ID=fireql-emulator
+export GOOGLE_CLOUD_PROJECT=fireql-emulator
+cargo test --test emulator --test e2e_seed
 ```
 
 To load fixed e2e data, seed `fixtures/emulator-e2e.json` with `fireql-emulator-seed`.
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
-export FIRESTORE_PROJECT_ID=demo-fireql
+export FIRESTORE_PROJECT_ID=fireql-emulator
 cargo run --bin fireql-emulator-seed
 ```
 
