@@ -211,16 +211,15 @@ async fn fetch_right_docs(
     };
 
     for chunk in chunks {
-        // The full document path is deliberately sent as a plain string
-        // (`SqlValue::Literal`), not `SqlValue::Reference`: the string form
-        // is what the emulator e2e join tests validate against `__name__`;
-        // a ReferenceValue here would change the wire type untested.
+        // `__name__` / document-key filters require a ReferenceValue on the
+        // wire; a plain string literal is rejected by Firestore as
+        // "__key__ filter value must be a Key".
         let in_values: Vec<SqlValue> = if join.right_field == "__name__" {
             chunk
                 .iter()
                 .map(|k| match k {
                     crate::joiner::JoinKey::String(s) => {
-                        SqlValue::Literal(serde_json::Value::String(format!("{doc_path}/{s}")))
+                        SqlValue::Reference(format!("{doc_path}/{s}"))
                     }
                     _ => SqlValue::Literal(k.to_json_value()),
                 })
