@@ -1,6 +1,6 @@
 mod support;
 
-use fireql::{FireqlOutput, FireqlValue};
+use fireql::{FireqlError, FireqlOutput, FireqlValue};
 use firestore::FirestoreCreateSupport;
 use serde_json::json;
 use support::{open_db, open_fireql, project_id, should_skip, unique_suffix};
@@ -718,6 +718,189 @@ async fn emulator_left_join() -> Result<(), Box<dyn std::error::Error>> {
         }
         _ => panic!("expected rows"),
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_or_independent_in_filters() -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let collection = format!("fireql_or_in_{}", unique_suffix());
+    for (id, status, role) in [
+        ("a1", "a", "z"),
+        ("b1", "b", "z"),
+        ("x1", "c", "x"),
+        ("y1", "c", "y"),
+        ("none", "c", "z"),
+    ] {
+        let _: serde_json::Value = db
+            .create_obj(
+                &collection,
+                Some(id),
+                &json!({ "status": status, "role": role }),
+                None,
+            )
+            .await?;
+    }
+
+    let sql = format!(
+        "SELECT * FROM {collection} WHERE status IN ('a','b') OR role IN ('x','y')"
+    );
+    let output = fireql.execute(&sql).await?;
+    match output {
+        FireqlOutput::Rows(mut rows) => {
+            rows.sort_by(|a, b| a.id.cmp(&b.id));
+            let ids: Vec<_> = rows.iter().map(|r| r.id.as_str()).collect();
+            assert_eq!(ids, vec!["a1", "b1", "x1", "y1"]);
+        }
+        _ => panic!("expected rows"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_or_in_and_array_contains_any() -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let collection = format!("fireql_or_mixed_{}", unique_suffix());
+    for (id, status, tags) in [
+        ("by_status", "a", json!(["python"])),
+        ("by_tags", "z", json!(["sql", "cli"])),
+        ("neither", "z", json!(["python"])),
+    ] {
+        let _: serde_json::Value = db
+            .create_obj(
+                &collection,
+                Some(id),
+                &json!({ "status": status, "tags": tags }),
+                None,
+            )
+            .await?;
+    }
+
+    // Independent disjunction filters across OR branches: IN on one side,
+    // array-contains-any on the other.
+    let sql = format!(
+        "SELECT * FROM {collection} WHERE status IN ('a','b') OR array_contains_any(tags, ['sql','cli'])"
+    );
+    let output = fireql.execute(&sql).await?;
+    match output {
+        FireqlOutput::Rows(mut rows) => {
+            rows.sort_by(|a, b| a.id.cmp(&b.id));
+            let ids: Vec<_> = rows.iter().map(|r| r.id.as_str()).collect();
+            assert_eq!(ids, vec!["by_status", "by_tags"]);
+        }
+        _ => panic!("expected rows"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_or_with_not_in_is_rejected_by_firestore() -> Result<(), Box<dyn std::error::Error>>
+{
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let collection = format!("fireql_or_notin_{}", unique_suffix());
+    let _: serde_json::Value = db
+        .create_obj(
+            &collection,
+            Some("d1"),
+            &json!({ "status": "a", "role": "x" }),
+            None,
+        )
+        .await?;
+
+    // fireql accepts NOT IN in an OR branch (per-branch validation), but
+    // Firestore rejects NOT_IN combined with OR. Surface that as a Firestore error.
+    let sql = format!(
+        "SELECT * FROM {collection} WHERE status NOT IN ('gone') OR role IN ('x','y')"
+    );
+    let err = fireql
+        .execute(&sql)
+        .await
+        .expect_err("NOT IN combined with OR must fail at Firestore");
+    assert!(
+        matches!(err, FireqlError::Firestore(_)),
+        "expected Firestore error, got {err}"
+    );
+    assert!(
+        err.to_string().contains("NOT_IN") || err.to_string().to_ascii_lowercase().contains("or"),
+        "unexpected error message: {err}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_rejects_multiple_in_within_same_branch() -> Result<(), Box<dyn std::error::Error>>
+{
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let collection = format!("fireql_or_reject_{}", unique_suffix());
+    // Two IN filters in one conjunction exceed Firestore's per-branch limit
+    // and must fail in fireql validation before the emulator is contacted.
+    let sql = format!(
+        "SELECT * FROM {collection} WHERE status IN ('a','b') AND role IN ('x','y')"
+    );
+    let err = fireql
+        .execute(&sql)
+        .await
+        .expect_err("multiple IN in one branch must be rejected");
+    assert!(
+        matches!(err, FireqlError::InvalidQuery(_)),
+        "expected InvalidQuery, got {err}"
+    );
 
     Ok(())
 }
