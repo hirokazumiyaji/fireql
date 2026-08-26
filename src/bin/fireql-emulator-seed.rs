@@ -58,7 +58,7 @@ impl Source for EmulatorTokenSource {
         Ok(Token::new(
             "Bearer".to_string(),
             "owner".into(),
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            firestore::jiff::Timestamp::MAX,
         ))
     }
 }
