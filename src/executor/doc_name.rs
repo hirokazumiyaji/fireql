@@ -47,13 +47,7 @@ pub(super) fn parse_doc_name(name: &str) -> Result<DocNameParts> {
     })
 }
 
-pub(super) fn docs_to_output(
-    docs: Vec<gcloud_sdk::google::firestore::v1::Document>,
-) -> Result<Vec<DocOutput>> {
-    docs.into_iter().map(doc_to_output).collect()
-}
-
-fn doc_to_output(doc: gcloud_sdk::google::firestore::v1::Document) -> Result<DocOutput> {
+pub(super) fn doc_to_output(doc: gcloud_sdk::google::firestore::v1::Document) -> Result<DocOutput> {
     let parts = parse_doc_name(&doc.name)?;
     let data = FireqlValue::from_document_fields(doc.fields);
 
