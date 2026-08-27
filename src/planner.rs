@@ -4,13 +4,10 @@ use crate::sql::{
     OrderDirection, Projection, SqlValue, UnaryOp,
 };
 use chrono::{DateTime, Utc};
+use firestore::select_filter_builder::FirestoreQueryFilterBuilder;
 use firestore::{
-    FirestoreAggregatedQueryParams, FirestoreAggregation, FirestoreAggregationOperator,
-    FirestoreAggregationOperatorAvg, FirestoreAggregationOperatorCount,
-    FirestoreAggregationOperatorSum, FirestoreQueryCollection, FirestoreQueryDirection,
-    FirestoreQueryFilter, FirestoreQueryFilterCompare, FirestoreQueryFilterComposite,
-    FirestoreQueryFilterCompositeOperator, FirestoreQueryFilterUnary, FirestoreQueryOrder,
-    FirestoreQueryParams, FirestoreValue,
+    FirestoreQueryCollection, FirestoreQueryDirection, FirestoreQueryFilter, FirestoreQueryOrder,
+    FirestoreValue,
 };
 use serde::Serialize;
 
@@ -20,36 +17,55 @@ pub(crate) const MAX_IN_VALUES: usize = 30;
 pub(crate) const MAX_NOT_IN_VALUES: usize = 10;
 pub(crate) const MAX_ARRAY_CONTAINS_ANY_VALUES: usize = 30;
 
-pub fn build_query_params(
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedSelect {
+    pub collection_id: FirestoreQueryCollection,
+    pub parent: Option<String>,
+    pub all_descendants: bool,
+    pub filter: Option<FirestoreQueryFilter>,
+    pub order_by: Vec<FirestoreQueryOrder>,
+    pub limit: Option<u32>,
+    pub return_only_fields: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlannedAggregation {
+    pub select: PlannedSelect, // order_by/limit empty; enforced in plan_aggregation
+    pub aggregations: Vec<AggregationExpr>, // fireql SQL AST; Fluent mapping at execute time
+}
+
+pub fn plan_select(
     collection: &CollectionSpec,
     filter: Option<&FilterExpr>,
     order_by: &[OrderBy],
     limit: Option<u32>,
     projection: Option<&Projection>,
     documents_path: Option<&str>,
-) -> Result<FirestoreQueryParams> {
+) -> Result<PlannedSelect> {
     validate_query_constraints(filter, order_by)?;
 
-    let mut params = FirestoreQueryParams::new(firestore_query_collection(collection));
+    let collection_id = firestore_query_collection(collection);
+    let all_descendants = collection.is_group;
 
-    if collection.is_group {
-        params.all_descendants = Some(true);
-    }
-
-    if let Some(pp) = &collection.parent_path {
+    let parent = if let Some(pp) = &collection.parent_path {
         let base = documents_path.ok_or_else(|| {
             FireqlError::InvalidQuery(
                 "collection() with a subcollection path requires database context".to_string(),
             )
         })?;
-        params.parent = Some(format!("{base}/{pp}"));
-    }
+        Some(format!("{base}/{pp}"))
+    } else {
+        None
+    };
 
-    if let Some(filter_expr) = filter {
-        params.filter = Some(build_filter(filter_expr, documents_path)?);
-    }
+    let fb = FirestoreQueryFilterBuilder;
+    let filter = if let Some(filter_expr) = filter {
+        build_filter(&fb, filter_expr, documents_path)?
+    } else {
+        None
+    };
 
-    if !order_by.is_empty() {
+    let order_by = if !order_by.is_empty() {
         let mut order = Vec::with_capacity(order_by.len());
         for item in order_by {
             order.push(FirestoreQueryOrder {
@@ -60,28 +76,35 @@ pub fn build_query_params(
                 },
             });
         }
-        params.order_by = Some(order);
-    }
+        order
+    } else {
+        Vec::new()
+    };
 
-    if let Some(limit) = limit {
-        params.limit = Some(limit);
-    }
+    let return_only_fields = match projection {
+        Some(Projection::Fields(fields)) => Some(fields.clone()),
+        _ => None,
+    };
 
-    if let Some(Projection::Fields(fields)) = projection {
-        params.return_only_fields = Some(fields.clone());
-    }
-
-    Ok(params)
+    Ok(PlannedSelect {
+        collection_id,
+        parent,
+        all_descendants,
+        filter,
+        order_by,
+        limit,
+        return_only_fields,
+    })
 }
 
-pub fn build_aggregated_query_params(
+pub fn plan_aggregation(
     collection: &CollectionSpec,
     filter: Option<&FilterExpr>,
     order_by: &[OrderBy],
     limit: Option<u32>,
     aggregations: &[AggregationExpr],
     documents_path: Option<&str>,
-) -> Result<FirestoreAggregatedQueryParams> {
+) -> Result<PlannedAggregation> {
     if !order_by.is_empty() {
         return Err(FireqlError::InvalidQuery(
             "ORDER BY is not supported in aggregation queries".to_string(),
@@ -92,42 +115,29 @@ pub fn build_aggregated_query_params(
             "LIMIT is not supported in aggregation queries".to_string(),
         ));
     }
-    let query_params =
-        build_query_params(collection, filter, order_by, limit, None, documents_path)?;
-    let mut aggs = Vec::with_capacity(aggregations.len());
     for agg in aggregations {
-        aggs.push(build_aggregation(agg)?);
+        match agg.func {
+            AggregationFunc::Count => {}
+            AggregationFunc::Sum => {
+                if agg.field.is_none() {
+                    return Err(FireqlError::InvalidQuery(
+                        "SUM requires a field".to_string(),
+                    ));
+                }
+            }
+            AggregationFunc::Avg => {
+                if agg.field.is_none() {
+                    return Err(FireqlError::InvalidQuery(
+                        "AVG requires a field".to_string(),
+                    ));
+                }
+            }
+        }
     }
-    Ok(FirestoreAggregatedQueryParams {
-        query_params,
-        aggregations: aggs,
-    })
-}
-
-fn build_aggregation(agg: &AggregationExpr) -> Result<FirestoreAggregation> {
-    let operator = match agg.func {
-        AggregationFunc::Count => {
-            FirestoreAggregationOperator::Count(FirestoreAggregationOperatorCount { up_to: None })
-        }
-        AggregationFunc::Sum => {
-            let field = agg
-                .field
-                .clone()
-                .ok_or_else(|| FireqlError::InvalidQuery("SUM requires a field".to_string()))?;
-            FirestoreAggregationOperator::Sum(FirestoreAggregationOperatorSum { field_name: field })
-        }
-        AggregationFunc::Avg => {
-            let field = agg
-                .field
-                .clone()
-                .ok_or_else(|| FireqlError::InvalidQuery("AVG requires a field".to_string()))?;
-            FirestoreAggregationOperator::Avg(FirestoreAggregationOperatorAvg { field_name: field })
-        }
-    };
-
-    Ok(FirestoreAggregation {
-        alias: agg.alias.clone(),
-        operator: Some(operator),
+    let select = plan_select(collection, filter, order_by, limit, None, documents_path)?;
+    Ok(PlannedAggregation {
+        select,
+        aggregations: aggregations.to_vec(),
     })
 }
 
@@ -136,86 +146,69 @@ mod validate;
 use validate::validate_query_constraints;
 
 pub fn build_filter(
+    fb: &FirestoreQueryFilterBuilder,
     filter: &FilterExpr,
     documents_path: Option<&str>,
-) -> Result<FirestoreQueryFilter> {
+) -> Result<Option<FirestoreQueryFilter>> {
     match filter {
-        FilterExpr::Compare { field, op, value } => Ok(FirestoreQueryFilter::Compare(Some(
-            compare_op_to_firestore(field, *op, value, documents_path)?,
-        ))),
-        FilterExpr::ArrayContains { field, value } => Ok(FirestoreQueryFilter::Compare(Some(
-            FirestoreQueryFilterCompare::ArrayContains(
-                field.clone(),
-                sql_value_to_firestore(value, documents_path)?,
-            ),
-        ))),
-        FilterExpr::ArrayContainsAny { field, values } => Ok(FirestoreQueryFilter::Compare(Some(
-            FirestoreQueryFilterCompare::ArrayContainsAny(
-                field.clone(),
-                sql_values_to_firestore_array(values, documents_path)?,
-            ),
-        ))),
+        FilterExpr::Compare { field, op, value } => {
+            let firestore_value = sql_value_to_firestore(value, documents_path)?;
+            let f = fb.field(field);
+            let filter = match op {
+                CompareOp::Eq => f.eq(firestore_value),
+                CompareOp::NotEq => f.neq(firestore_value),
+                CompareOp::Lt => f.less_than(firestore_value),
+                CompareOp::LtEq => f.less_than_or_equal(firestore_value),
+                CompareOp::Gt => f.greater_than(firestore_value),
+                CompareOp::GtEq => f.greater_than_or_equal(firestore_value),
+            };
+            Ok(filter)
+        }
+        FilterExpr::ArrayContains { field, value } => {
+            let firestore_value = sql_value_to_firestore(value, documents_path)?;
+            Ok(fb.field(field).array_contains(firestore_value))
+        }
+        FilterExpr::ArrayContainsAny { field, values } => {
+            let firestore_value = sql_values_to_firestore_array(values, documents_path)?;
+            Ok(fb.field(field).array_contains_any(firestore_value))
+        }
         FilterExpr::InList {
             field,
             values,
             negated,
         } => {
             let value = sql_values_to_firestore_array(values, documents_path)?;
+            let f = fb.field(field);
             let filter = if *negated {
-                FirestoreQueryFilterCompare::NotIn(field.clone(), value)
+                f.is_not_in(value)
             } else {
-                FirestoreQueryFilterCompare::In(field.clone(), value)
+                f.is_in(value)
             };
-            Ok(FirestoreQueryFilter::Compare(Some(filter)))
+            Ok(filter)
         }
-        FilterExpr::Unary { field, op } => Ok(FirestoreQueryFilter::Unary(match op {
-            UnaryOp::IsNull => FirestoreQueryFilterUnary::IsNull(field.clone()),
-            UnaryOp::IsNotNull => FirestoreQueryFilterUnary::IsNotNull(field.clone()),
-        })),
-        FilterExpr::And(filters) => Ok(FirestoreQueryFilter::Composite(
-            FirestoreQueryFilterComposite {
-                operator: FirestoreQueryFilterCompositeOperator::And,
-                for_all_filters: filters
-                    .iter()
-                    .map(|f| build_filter(f, documents_path))
-                    .collect::<Result<Vec<_>>>()?,
-            },
-        )),
-        FilterExpr::Or(filters) => Ok(FirestoreQueryFilter::Composite(
-            FirestoreQueryFilterComposite {
-                operator: FirestoreQueryFilterCompositeOperator::Or,
-                for_all_filters: filters
-                    .iter()
-                    .map(|f| build_filter(f, documents_path))
-                    .collect::<Result<Vec<_>>>()?,
-            },
-        )),
+        FilterExpr::Unary { field, op } => {
+            let f = fb.field(field);
+            let filter = match op {
+                UnaryOp::IsNull => f.is_null(),
+                UnaryOp::IsNotNull => f.is_not_null(),
+            };
+            Ok(filter)
+        }
+        FilterExpr::And(filters) => {
+            let built: Vec<Option<FirestoreQueryFilter>> = filters
+                .iter()
+                .map(|f| build_filter(fb, f, documents_path))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(fb.for_all(built))
+        }
+        FilterExpr::Or(filters) => {
+            let built: Vec<Option<FirestoreQueryFilter>> = filters
+                .iter()
+                .map(|f| build_filter(fb, f, documents_path))
+                .collect::<Result<Vec<_>>>()?;
+            Ok(fb.for_any(built))
+        }
     }
-}
-
-fn compare_op_to_firestore(
-    field: &str,
-    op: CompareOp,
-    value: &SqlValue,
-    documents_path: Option<&str>,
-) -> Result<FirestoreQueryFilterCompare> {
-    let firestore_value = sql_value_to_firestore(value, documents_path)?;
-    Ok(match op {
-        CompareOp::Eq => FirestoreQueryFilterCompare::Equal(field.to_string(), firestore_value),
-        CompareOp::NotEq => {
-            FirestoreQueryFilterCompare::NotEqual(field.to_string(), firestore_value)
-        }
-        CompareOp::Lt => FirestoreQueryFilterCompare::LessThan(field.to_string(), firestore_value),
-        CompareOp::LtEq => {
-            FirestoreQueryFilterCompare::LessThanOrEqual(field.to_string(), firestore_value)
-        }
-        CompareOp::Gt => {
-            FirestoreQueryFilterCompare::GreaterThan(field.to_string(), firestore_value)
-        }
-        CompareOp::GtEq => {
-            FirestoreQueryFilterCompare::GreaterThanOrEqual(field.to_string(), firestore_value)
-        }
-    })
 }
 
 pub(crate) fn sql_value_to_firestore(
@@ -309,7 +302,7 @@ mod tests {
             parent_path: Some("users/u1".to_string()),
             is_group: false,
         };
-        let params = build_query_params(
+        let plan = plan_select(
             &col,
             None,
             &[],
@@ -319,14 +312,14 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            params.parent.as_deref(),
+            plan.parent.as_deref(),
             Some("projects/x/databases/(default)/documents/users/u1")
         );
         assert_eq!(
-            params.collection_id,
+            plan.collection_id,
             FirestoreQueryCollection::Single("posts".to_string())
         );
-        assert_eq!(params.all_descendants, None);
+        assert!(!plan.all_descendants);
     }
 
     #[test]
@@ -336,9 +329,9 @@ mod tests {
             parent_path: None,
             is_group: true,
         };
-        let params = build_query_params(&col, None, &[], None, None, None).unwrap();
-        assert_eq!(params.parent, None);
-        assert_eq!(params.all_descendants, Some(true));
+        let plan = plan_select(&col, None, &[], None, None, None).unwrap();
+        assert_eq!(plan.parent, None);
+        assert!(plan.all_descendants);
     }
 
     #[test]
@@ -348,7 +341,7 @@ mod tests {
             op: CompareOp::Gt,
             value: SqlValue::Literal(JsonValue::from(10)),
         };
-        let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
+        let result = plan_select(&collection(), Some(&filter), &[], None, None, None);
         assert!(result.is_ok());
     }
 
@@ -363,8 +356,8 @@ mod tests {
             field: "name".to_string(),
             direction: OrderDirection::Asc,
         }];
-        let err = build_query_params(&collection(), Some(&filter), &order_by, None, None, None)
-            .unwrap_err();
+        let err =
+            plan_select(&collection(), Some(&filter), &order_by, None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
@@ -379,8 +372,8 @@ mod tests {
             field: "age".to_string(),
             direction: OrderDirection::Asc,
         }];
-        let params = build_query_params(&collection(), Some(&filter), &order_by, None, None, None);
-        assert!(params.is_ok());
+        let plan = plan_select(&collection(), Some(&filter), &order_by, None, None, None);
+        assert!(plan.is_ok());
     }
 
     #[test]
@@ -401,8 +394,8 @@ mod tests {
             field: "age".to_string(),
             direction: OrderDirection::Asc,
         }];
-        let err = build_query_params(&collection(), Some(&filter), &order_by, None, None, None)
-            .unwrap_err();
+        let err =
+            plan_select(&collection(), Some(&filter), &order_by, None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
@@ -422,7 +415,7 @@ mod tests {
                 negated: false,
             },
         ]);
-        let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
+        let result = plan_select(&collection(), Some(&filter), &[], None, None, None);
         assert!(result.is_ok());
     }
 
@@ -440,8 +433,7 @@ mod tests {
                 negated: false,
             },
         ]);
-        let err =
-            build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
+        let err = plan_select(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
@@ -454,8 +446,7 @@ mod tests {
                 .collect(),
             negated: false,
         };
-        let err =
-            build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
+        let err = plan_select(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
@@ -468,7 +459,7 @@ mod tests {
                 .collect(),
             negated: false,
         };
-        let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
+        let result = plan_select(&collection(), Some(&filter), &[], None, None, None);
         assert!(result.is_ok());
     }
 
@@ -481,8 +472,7 @@ mod tests {
                 .collect(),
             negated: true,
         };
-        let err =
-            build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
+        let err = plan_select(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
@@ -494,7 +484,7 @@ mod tests {
                 .map(|v| SqlValue::Literal(JsonValue::from(v)))
                 .collect(),
         };
-        let result = build_query_params(&collection(), Some(&filter), &[], None, None, None);
+        let result = plan_select(&collection(), Some(&filter), &[], None, None, None);
         assert!(result.is_ok());
     }
 
@@ -516,8 +506,8 @@ mod tests {
             field: "status".to_string(),
             direction: OrderDirection::Asc,
         }];
-        let err = build_query_params(&collection(), Some(&filter), &order_by, None, None, None)
-            .unwrap_err();
+        let err =
+            plan_select(&collection(), Some(&filter), &order_by, None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
@@ -535,8 +525,7 @@ mod tests {
                 negated: false,
             },
         ]);
-        let err =
-            build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
+        let err = plan_select(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
@@ -546,8 +535,7 @@ mod tests {
             field: "tags".to_string(),
             values: vec![],
         };
-        let err =
-            build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
+        let err = plan_select(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
@@ -564,8 +552,7 @@ mod tests {
                 negated: false,
             },
         ]);
-        let err =
-            build_query_params(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
+        let err = plan_select(&collection(), Some(&filter), &[], None, None, None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 
@@ -586,7 +573,7 @@ mod tests {
             alias: "count".to_string(),
         };
 
-        let err = build_aggregated_query_params(
+        let err = plan_aggregation(
             &collection(),
             Some(&filter),
             &order_by,
@@ -597,15 +584,27 @@ mod tests {
         .unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
 
-        let err = build_aggregated_query_params(
-            &collection(),
-            Some(&filter),
-            &[],
-            Some(10),
-            &[agg],
-            None,
-        )
-        .unwrap_err();
+        let err = plan_aggregation(&collection(), Some(&filter), &[], Some(10), &[agg], None)
+            .unwrap_err();
+        assert!(matches!(err, FireqlError::InvalidQuery(_)));
+    }
+
+    #[test]
+    fn sum_and_avg_require_field() {
+        let sum_agg = AggregationExpr {
+            func: AggregationFunc::Sum,
+            field: None,
+            alias: "s".to_string(),
+        };
+        let err = plan_aggregation(&collection(), None, &[], None, &[sum_agg], None).unwrap_err();
+        assert!(matches!(err, FireqlError::InvalidQuery(_)));
+
+        let avg_agg = AggregationExpr {
+            func: AggregationFunc::Avg,
+            field: None,
+            alias: "a".to_string(),
+        };
+        let err = plan_aggregation(&collection(), None, &[], None, &[avg_agg], None).unwrap_err();
         assert!(matches!(err, FireqlError::InvalidQuery(_)));
     }
 

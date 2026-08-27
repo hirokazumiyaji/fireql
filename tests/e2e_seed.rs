@@ -30,7 +30,7 @@ async fn emulator_seed_provides_reusable_e2e_data() -> Result<(), Box<dyn std::e
     }
 
     let project_id = project_id();
-    run_seed(&project_id)?;
+    // 1st seed: inserts initial documents
     run_seed(&project_id)?;
 
     let fireql = match open_fireql(&project_id).await {
@@ -38,12 +38,51 @@ async fn emulator_seed_provides_reusable_e2e_data() -> Result<(), Box<dyn std::e
         None => return Ok(()),
     };
 
+    // Mutate data to verify that the second seed actually updates (upserts) existing documents
+    let update_sql = "UPDATE e2e_users SET score = 999, active = false WHERE name = 'Alice'";
+    match fireql.execute(update_sql).await? {
+        FireqlOutput::Affected { affected } => assert_eq!(affected, 1),
+        other => panic!("expected affected, got {other:?}"),
+    }
+
+    // Verify mutation took effect
+    let check_sql = "SELECT score, active FROM e2e_users WHERE name = 'Alice'";
+    match fireql.execute(check_sql).await? {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].data.get("score"),
+                Some(&fireql::FireqlValue::Integer(999))
+            );
+            assert_eq!(
+                rows[0].data.get("active"),
+                Some(&fireql::FireqlValue::Boolean(false))
+            );
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+
+    // 2nd seed: should update existing mutated document back to fixture data
+    run_seed(&project_id)?;
+
     let users_sql = "SELECT * FROM e2e_users WHERE active = true ORDER BY score DESC LIMIT 10";
     match fireql.execute(users_sql).await? {
         FireqlOutput::Rows(rows) => {
             assert_eq!(rows.len(), 2);
             assert_eq!(rows[0].id, "alice");
+            assert_eq!(
+                rows[0].data.get("score"),
+                Some(&fireql::FireqlValue::Integer(120))
+            );
+            assert_eq!(
+                rows[0].data.get("active"),
+                Some(&fireql::FireqlValue::Boolean(true))
+            );
             assert_eq!(rows[1].id, "carol");
+            assert_eq!(
+                rows[1].data.get("score"),
+                Some(&fireql::FireqlValue::Integer(90))
+            );
         }
         _ => panic!("expected rows"),
     }

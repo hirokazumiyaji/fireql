@@ -1,12 +1,11 @@
-use super::batch::{
-    count_batch_outcome, drain_batch_results, FireqlWrite, BATCH_LIMIT,
-};
+use super::batch::{count_batch_outcome, drain_batch_results, FireqlWrite, BATCH_LIMIT};
 use super::doc_name::parse_doc_name;
+use super::select::stream_planned_select;
 use crate::error::{FireqlError, Result};
 use crate::output::FireqlOutput;
-use crate::planner::build_query_params;
+use crate::planner::plan_select;
 use crate::sql::{CollectionSpec, InsertSelectStatement, Projection, SelectProjection};
-use firestore::{firestore_document_from_map, FirestoreDb, FirestoreQuerySupport};
+use firestore::{firestore_document_from_map, FirestoreDb};
 use futures::stream::{self, StreamExt, TryStreamExt};
 use gcloud_sdk::google::firestore::v1::{precondition, write, Document, Precondition, Write};
 use rand::distr::{Alphanumeric, SampleString};
@@ -23,7 +22,7 @@ pub(super) async fn execute_insert_select(
         ));
     };
     let query_projection = insert_select_query_projection(projection);
-    let params = build_query_params(
+    let planned = plan_select(
         &stmt.source.collection,
         stmt.source.filter.as_ref(),
         &stmt.source.order_by,
@@ -34,8 +33,7 @@ pub(super) async fn execute_insert_select(
 
     // Stream the source query and write in BATCH_LIMIT-sized chunks so the
     // full source collection is never held in memory at once.
-    let chunk_stream = db
-        .stream_query_doc_with_errors(params)
+    let chunk_stream = stream_planned_select(db, planned)
         .await?
         .try_chunks(BATCH_LIMIT)
         .map(|chunk| match chunk {

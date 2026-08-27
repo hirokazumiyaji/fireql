@@ -2,12 +2,41 @@ use super::doc_name::doc_to_output;
 use crate::error::{FireqlError, Result};
 use crate::joiner::{chunk_keys, extract_join_keys, hash_join, JoinParams};
 use crate::output::{DocOutput, FireqlOutput};
-use crate::planner::{build_aggregated_query_params, build_query_params, MAX_IN_VALUES};
+use crate::planner::{plan_aggregation, plan_select, PlannedSelect, MAX_IN_VALUES};
 use crate::sql::{FilterExpr, JoinSpec, Projection, SelectProjection, SqlValue};
 use crate::value::FireqlValue;
-use firestore::{FirestoreAggregatedQuerySupport, FirestoreDb, FirestoreQuerySupport};
+use firestore::FirestoreDb;
+use futures::stream::BoxStream;
 use futures::TryStreamExt;
+use gcloud_sdk::google::firestore::v1::Document;
 use std::collections::HashSet;
+
+pub(super) async fn stream_planned_select<'b>(
+    db: &'b FirestoreDb,
+    planned: PlannedSelect,
+) -> Result<BoxStream<'b, firestore::FirestoreResult<Document>>> {
+    let mut q = db.fluent().select();
+    if let Some(fields) = planned.return_only_fields {
+        q = q.fields(fields);
+    }
+    let mut q = q.from(planned.collection_id);
+    if let Some(parent) = planned.parent {
+        q = q.parent(parent);
+    }
+    if planned.all_descendants {
+        q = q.all_descendants();
+    }
+    if let Some(filter) = planned.filter {
+        q = q.filter(move |_| Some(filter.clone()));
+    }
+    if !planned.order_by.is_empty() {
+        q = q.order_by(planned.order_by);
+    }
+    if let Some(limit) = planned.limit {
+        q = q.limit(limit);
+    }
+    Ok(q.stream_query_with_errors().await?)
+}
 
 pub(super) async fn execute_select(
     db: &FirestoreDb,
@@ -19,7 +48,7 @@ pub(super) async fn execute_select(
 
     match &stmt.projection {
         SelectProjection::Fields(projection) => {
-            let params = build_query_params(
+            let planned = plan_select(
                 &stmt.collection,
                 stmt.filter.as_ref(),
                 &stmt.order_by,
@@ -31,8 +60,7 @@ pub(super) async fn execute_select(
             // Stream document bodies so callers that later write row-by-row
             // (JSON) do not force an intermediate all-at-once Firestore fetch
             // API; CSV/Table still buffer via FireqlOutput::Rows today (#28).
-            let rows: Vec<DocOutput> = db
-                .stream_query_doc_with_errors(params)
+            let rows: Vec<DocOutput> = stream_planned_select(db, planned)
                 .await?
                 .map_err(FireqlError::from)
                 .and_then(|doc| async move { doc_to_output(doc) })
@@ -41,7 +69,7 @@ pub(super) async fn execute_select(
             Ok(FireqlOutput::Rows(rows))
         }
         SelectProjection::Aggregations(aggregations) => {
-            let params = build_aggregated_query_params(
+            let planned = plan_aggregation(
                 &stmt.collection,
                 stmt.filter.as_ref(),
                 &stmt.order_by,
@@ -49,7 +77,32 @@ pub(super) async fn execute_select(
                 aggregations,
                 Some(db.get_documents_path().as_str()),
             )?;
-            let docs = db.aggregated_query_doc(params).await?;
+            let mut q = db.fluent().select().from(planned.select.collection_id);
+            if let Some(parent) = planned.select.parent {
+                q = q.parent(parent);
+            }
+            if planned.select.all_descendants {
+                q = q.all_descendants();
+            }
+            if let Some(filter) = planned.select.filter {
+                q = q.filter(move |_| Some(filter.clone()));
+            }
+            let docs = q
+                .aggregate(|agg| {
+                    agg.fields(planned.aggregations.iter().map(|a| match a.func {
+                        crate::sql::AggregationFunc::Count => agg.field(&a.alias).count(),
+                        crate::sql::AggregationFunc::Sum => {
+                            let field = a.field.as_deref().unwrap_or_default();
+                            agg.field(&a.alias).sum(field)
+                        }
+                        crate::sql::AggregationFunc::Avg => {
+                            let field = a.field.as_deref().unwrap_or_default();
+                            agg.field(&a.alias).avg(field)
+                        }
+                    }))
+                })
+                .query()
+                .await?;
             let data = docs
                 .into_iter()
                 .next()
@@ -146,7 +199,7 @@ async fn execute_join_select(
         .filter
         .as_ref()
         .map(|f| strip_alias_from_filter(f, left_alias));
-    let left_params = build_query_params(
+    let left_planned = plan_select(
         &stmt.collection,
         stripped_filter.as_ref(),
         &stmt.order_by,
@@ -154,8 +207,7 @@ async fn execute_join_select(
         None,
         Some(db.get_documents_path().as_str()),
     )?;
-    let left_docs: Vec<DocOutput> = db
-        .stream_query_doc_with_errors(left_params)
+    let left_docs: Vec<DocOutput> = stream_planned_select(db, left_planned)
         .await?
         .map_err(FireqlError::from)
         .and_then(|doc| async move { doc_to_output(doc) })
@@ -252,7 +304,7 @@ async fn fetch_right_docs(
             negated: false,
         };
 
-        let right_params = build_query_params(
+        let right_planned = plan_select(
             &join.collection,
             Some(&in_filter),
             &[],
@@ -261,8 +313,7 @@ async fn fetch_right_docs(
             Some(db.get_documents_path().as_str()),
         )?;
 
-        let chunk_docs: Vec<DocOutput> = db
-            .stream_query_doc_with_errors(right_params)
+        let chunk_docs: Vec<DocOutput> = stream_planned_select(db, right_planned)
             .await?
             .map_err(FireqlError::from)
             .and_then(|doc| async move { doc_to_output(doc) })
