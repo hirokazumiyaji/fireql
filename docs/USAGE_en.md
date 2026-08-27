@@ -238,6 +238,12 @@ SELECT AVG(score) FROM users WHERE active = true;
 { "affected": 5 }
 ```
 
+### CSV / Table
+
+- `--format csv`: header columns come from the **first row's fields** only (row-streaming friendly). Fields that appear only on later rows are omitted from the header
+- `--format table`: buffers a union of all fields (display-oriented)
+- Library callers can stream CSV with `write_csv_rows`
+
 ## 7. Firestore Constraints (Validated at Query Time)
 
 - `UPDATE` / `DELETE` require a `WHERE` clause
