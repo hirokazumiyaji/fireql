@@ -1,4 +1,4 @@
-use super::doc_name::docs_to_output;
+use super::doc_name::doc_to_output;
 use crate::error::{FireqlError, Result};
 use crate::joiner::{chunk_keys, extract_join_keys, hash_join, JoinParams};
 use crate::output::{DocOutput, FireqlOutput};
@@ -6,6 +6,7 @@ use crate::planner::{build_aggregated_query_params, build_query_params, MAX_IN_V
 use crate::sql::{FilterExpr, JoinSpec, Projection, SelectProjection, SqlValue};
 use crate::value::FireqlValue;
 use firestore::{FirestoreAggregatedQuerySupport, FirestoreDb, FirestoreQuerySupport};
+use futures::TryStreamExt;
 use std::collections::HashSet;
 
 pub(super) async fn execute_select(
@@ -27,8 +28,17 @@ pub(super) async fn execute_select(
                 Some(db.get_documents_path().as_str()),
             )?;
 
-            let docs = db.query_doc(params).await?;
-            Ok(FireqlOutput::Rows(docs_to_output(docs)?))
+            // Stream document bodies so callers that later write row-by-row
+            // (JSON) do not force an intermediate all-at-once Firestore fetch
+            // API; CSV/Table still buffer via FireqlOutput::Rows today (#28).
+            let rows: Vec<DocOutput> = db
+                .stream_query_doc_with_errors(params)
+                .await?
+                .map_err(FireqlError::from)
+                .and_then(|doc| async move { doc_to_output(doc) })
+                .try_collect()
+                .await?;
+            Ok(FireqlOutput::Rows(rows))
         }
         SelectProjection::Aggregations(aggregations) => {
             let params = build_aggregated_query_params(
@@ -144,8 +154,13 @@ async fn execute_join_select(
         None,
         Some(db.get_documents_path().as_str()),
     )?;
-    let left_docs_raw = db.query_doc(left_params).await?;
-    let left_docs = docs_to_output(left_docs_raw)?;
+    let left_docs: Vec<DocOutput> = db
+        .stream_query_doc_with_errors(left_params)
+        .await?
+        .map_err(FireqlError::from)
+        .and_then(|doc| async move { doc_to_output(doc) })
+        .try_collect()
+        .await?;
 
     let mut current_result = left_docs;
     let mut is_joined = false;
@@ -246,8 +261,14 @@ async fn fetch_right_docs(
             Some(db.get_documents_path().as_str()),
         )?;
 
-        let chunk_docs = db.query_doc(right_params).await?;
-        right_docs.extend(docs_to_output(chunk_docs)?);
+        let chunk_docs: Vec<DocOutput> = db
+            .stream_query_doc_with_errors(right_params)
+            .await?
+            .map_err(FireqlError::from)
+            .and_then(|doc| async move { doc_to_output(doc) })
+            .try_collect()
+            .await?;
+        right_docs.extend(chunk_docs);
     }
 
     Ok(right_docs)
@@ -370,7 +391,8 @@ mod tests {
             &SelectProjection::Fields(Projection::Fields(vec!["name".to_string()])),
         );
 
-        let keys: Vec<_> = rows[0].data.keys().map(String::as_str).collect();
+        let mut keys: Vec<_> = rows[0].data.keys().map(String::as_str).collect();
+        keys.sort_unstable();
         assert_eq!(keys, vec!["name", "u.name"]);
     }
 
