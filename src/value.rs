@@ -26,9 +26,7 @@ impl FireqlValue {
             Some(ValueType::BooleanValue(b)) => Self::Boolean(b),
             Some(ValueType::IntegerValue(i)) => Self::Integer(i),
             Some(ValueType::DoubleValue(d)) => Self::Double(d),
-            Some(ValueType::TimestampValue(ts)) => {
-                Self::timestamp_from_parts(ts.seconds, ts.nanos)
-            }
+            Some(ValueType::TimestampValue(ts)) => Self::timestamp_from_parts(ts.seconds, ts.nanos),
             Some(ValueType::StringValue(s)) => Self::String(s),
             Some(ValueType::BytesValue(b)) => Self::Bytes(b),
             Some(ValueType::ReferenceValue(r)) => Self::Reference(r),
@@ -208,9 +206,7 @@ mod tests {
         // not expected from Firestore; clamping documents the defensive path.
         assert_eq!(
             FireqlValue::timestamp_from_parts(1_704_067_200, -1),
-            FireqlValue::Timestamp(
-                chrono::DateTime::from_timestamp(1_704_067_200, 0).unwrap()
-            )
+            FireqlValue::Timestamp(chrono::DateTime::from_timestamp(1_704_067_200, 0).unwrap())
         );
     }
 

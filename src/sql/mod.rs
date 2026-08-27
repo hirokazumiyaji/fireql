@@ -46,14 +46,14 @@ pub enum SelectProjection {
     Aggregations(Vec<AggregationExpr>),
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AggregationExpr {
     pub func: AggregationFunc,
     pub field: Option<String>,
     pub alias: String,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AggregationFunc {
     Count,
     Sum,

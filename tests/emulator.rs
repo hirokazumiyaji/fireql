@@ -1,9 +1,44 @@
 mod support;
 
 use fireql::{FireqlError, FireqlOutput, FireqlValue};
-use firestore::FirestoreCreateSupport;
 use serde_json::json;
 use support::{open_db, open_fireql, project_id, should_skip, unique_suffix};
+
+async fn create_test_doc(
+    db: &firestore::FirestoreDb,
+    collection: &str,
+    doc_id: &str,
+    data: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _: serde_json::Value = db
+        .fluent()
+        .insert()
+        .into(collection)
+        .document_id(doc_id)
+        .object(data)
+        .execute()
+        .await?;
+    Ok(())
+}
+
+async fn create_test_doc_at(
+    db: &firestore::FirestoreDb,
+    parent: &str,
+    collection: &str,
+    doc_id: &str,
+    data: &serde_json::Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let _: serde_json::Value = db
+        .fluent()
+        .insert()
+        .into(collection)
+        .document_id(doc_id)
+        .parent(parent)
+        .object(data)
+        .execute()
+        .await?;
+    Ok(())
+}
 
 #[tokio::test]
 async fn emulator_select_update_delete() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,9 +64,7 @@ async fn emulator_select_update_delete() -> Result<(), Box<dyn std::error::Error
         "age": 30,
         "active": true,
     });
-    let _: serde_json::Value = db
-        .create_obj(&collection, Some(doc_id), &data, None)
-        .await?;
+    create_test_doc(&db, &collection, doc_id, &data).await?;
 
     let select_sql = format!("SELECT * FROM {collection} WHERE age = 30 LIMIT 10");
     let output = fireql.execute(&select_sql).await?;
@@ -94,14 +127,13 @@ async fn emulator_update_order_by_limit() -> Result<(), Box<dyn std::error::Erro
         ("d07", 7),
         ("d08", 8),
     ] {
-        let _: serde_json::Value = db
-            .create_obj(
-                &collection,
-                Some(doc_id),
-                &json!({"status": "pending", "priority": priority}),
-                None,
-            )
-            .await?;
+        create_test_doc(
+            &db,
+            &collection,
+            doc_id,
+            &json!({"status": "pending", "priority": priority}),
+        )
+        .await?;
     }
 
     let update_sql = format!(
@@ -174,22 +206,20 @@ async fn emulator_insert_select_auto_id_copy() -> Result<(), Box<dyn std::error:
     let source = format!("fireql_insert_source_{suffix}");
     let dest = format!("fireql_insert_dest_{suffix}");
 
-    let _: serde_json::Value = db
-        .create_obj(
-            &source,
-            Some("u1"),
-            &json!({"name": "Alice", "disabled": true, "score": 10}),
-            None,
-        )
-        .await?;
-    let _: serde_json::Value = db
-        .create_obj(
-            &source,
-            Some("u2"),
-            &json!({"name": "Bob", "disabled": false, "score": 20}),
-            None,
-        )
-        .await?;
+    create_test_doc(
+        &db,
+        &source,
+        "u1",
+        &json!({"name": "Alice", "disabled": true, "score": 10}),
+    )
+    .await?;
+    create_test_doc(
+        &db,
+        &source,
+        "u2",
+        &json!({"name": "Bob", "disabled": false, "score": 20}),
+    )
+    .await?;
 
     let output = fireql
         .execute(&format!(
@@ -245,14 +275,13 @@ async fn emulator_insert_select_preserves_id_when_name_column_is_used(
     let source = format!("fireql_insert_named_source_{suffix}");
     let dest = format!("fireql_insert_named_dest_{suffix}");
 
-    let _: serde_json::Value = db
-        .create_obj(
-            &source,
-            Some("preserved_id"),
-            &json!({"name": "Alice", "disabled": true}),
-            None,
-        )
-        .await?;
+    create_test_doc(
+        &db,
+        &source,
+        "preserved_id",
+        &json!({"name": "Alice", "disabled": true}),
+    )
+    .await?;
 
     let output = fireql
         .execute(&format!(
@@ -302,9 +331,7 @@ async fn emulator_insert_select_empty_source_reports_zero() -> Result<(), Box<dy
     let source = format!("fireql_insert_empty_source_{suffix}");
     let dest = format!("fireql_insert_empty_dest_{suffix}");
 
-    let _: serde_json::Value = db
-        .create_obj(&source, Some("u1"), &json!({"disabled": false}), None)
-        .await?;
+    create_test_doc(&db, &source, "u1", &json!({"disabled": false})).await?;
 
     let output = fireql
         .execute(&format!(
@@ -338,14 +365,7 @@ async fn emulator_collection_group_select() -> Result<(), Box<dyn std::error::Er
 
     let parent_collection = format!("fireql_parents_{}", unique_suffix());
     let parent_id = "parent1";
-    let _: serde_json::Value = db
-        .create_obj(
-            &parent_collection,
-            Some(parent_id),
-            &json!({"name": "p"}),
-            None,
-        )
-        .await?;
+    create_test_doc(&db, &parent_collection, parent_id, &json!({"name": "p"})).await?;
 
     let parent_path = format!(
         "{}/{}/{}",
@@ -355,15 +375,14 @@ async fn emulator_collection_group_select() -> Result<(), Box<dyn std::error::Er
     );
     let post_title = format!("hello-{}", unique_suffix());
 
-    let _: serde_json::Value = db
-        .create_obj_at(
-            &parent_path,
-            "posts",
-            Some("post1"),
-            &json!({"title": &post_title, "likes": 1}),
-            None,
-        )
-        .await?;
+    create_test_doc_at(
+        &db,
+        &parent_path,
+        "posts",
+        "post1",
+        &json!({"title": &post_title, "likes": 1}),
+    )
+    .await?;
 
     let select_sql =
         format!("SELECT * FROM collection_group('posts') WHERE title = '{post_title}' LIMIT 5");
@@ -401,38 +420,30 @@ async fn emulator_collection_subcollection_queries() -> Result<(), Box<dyn std::
     let title_a = format!("title-a-{}", unique_suffix());
     let title_b = format!("title-b-{}", unique_suffix());
 
-    let _: serde_json::Value = db
-        .create_obj(&users_col, Some("u1"), &json!({"name": "JoinUser"}), None)
-        .await?;
+    create_test_doc(&db, &users_col, "u1", &json!({"name": "JoinUser"})).await?;
 
-    let _: serde_json::Value = db
-        .create_obj(&parents_col, Some("a"), &json!({"label": "A"}), None)
-        .await?;
-    let _: serde_json::Value = db
-        .create_obj(&parents_col, Some("b"), &json!({"label": "B"}), None)
-        .await?;
+    create_test_doc(&db, &parents_col, "a", &json!({"label": "A"})).await?;
+    create_test_doc(&db, &parents_col, "b", &json!({"label": "B"})).await?;
 
     let parent_a = format!("{}/{}/{}", db.get_documents_path(), parents_col, "a");
 
-    let _: serde_json::Value = db
-        .create_obj_at(
-            &parent_a,
-            "posts",
-            Some("p1"),
-            &json!({"title": &title_a, "n": 1, "user_id": "u1"}),
-            None,
-        )
-        .await?;
+    create_test_doc_at(
+        &db,
+        &parent_a,
+        "posts",
+        "p1",
+        &json!({"title": &title_a, "n": 1, "user_id": "u1"}),
+    )
+    .await?;
     let parent_b = format!("{}/{}/{}", db.get_documents_path(), parents_col, "b");
-    let _: serde_json::Value = db
-        .create_obj_at(
-            &parent_b,
-            "posts",
-            Some("p2"),
-            &json!({"title": &title_b, "n": 2, "user_id": "u1"}),
-            None,
-        )
-        .await?;
+    create_test_doc_at(
+        &db,
+        &parent_b,
+        "posts",
+        "p2",
+        &json!({"title": &title_b, "n": 2, "user_id": "u1"}),
+    )
+    .await?;
 
     let rel_a_posts = format!("{parents_col}/a/posts");
     let scoped_sql =
@@ -548,29 +559,25 @@ async fn emulator_inner_join_subcollection_right_document_name(
     let users_col = format!("fireql_namejoin_users_{}", unique_suffix());
     let post_title = format!("namejoin-{}", unique_suffix());
 
-    let _: serde_json::Value = db
-        .create_obj(&parents_col, Some("a"), &json!({}), None)
-        .await?;
+    create_test_doc(&db, &parents_col, "a", &json!({})).await?;
 
     let parent_a = format!("{}/{}/{}", db.get_documents_path(), parents_col, "a");
-    let _: serde_json::Value = db
-        .create_obj_at(
-            &parent_a,
-            "posts",
-            Some("doc_for_name"),
-            &json!({"title": &post_title}),
-            None,
-        )
-        .await?;
+    create_test_doc_at(
+        &db,
+        &parent_a,
+        "posts",
+        "doc_for_name",
+        &json!({"title": &post_title}),
+    )
+    .await?;
 
-    let _: serde_json::Value = db
-        .create_obj(
-            &users_col,
-            Some("u1"),
-            &json!({"name": "NameJoinUser", "post_ref": "doc_for_name"}),
-            None,
-        )
-        .await?;
+    create_test_doc(
+        &db,
+        &users_col,
+        "u1",
+        &json!({"name": "NameJoinUser", "post_ref": "doc_for_name"}),
+    )
+    .await?;
 
     let rel_posts = format!("{parents_col}/a/posts");
     let sql = format!(
@@ -614,37 +621,30 @@ async fn emulator_inner_join() -> Result<(), Box<dyn std::error::Error>> {
     let users_col = format!("fireql_join_users_{suffix}");
     let orders_col = format!("fireql_join_orders_{suffix}");
 
-    let _: serde_json::Value = db
-        .create_obj(&users_col, Some("u1"), &json!({"name": "Alice"}), None)
-        .await?;
-    let _: serde_json::Value = db
-        .create_obj(&users_col, Some("u2"), &json!({"name": "Bob"}), None)
-        .await?;
+    create_test_doc(&db, &users_col, "u1", &json!({"name": "Alice"})).await?;
+    create_test_doc(&db, &users_col, "u2", &json!({"name": "Bob"})).await?;
 
-    let _: serde_json::Value = db
-        .create_obj(
-            &orders_col,
-            Some("o1"),
-            &json!({"user_id": "u1", "amount": 100}),
-            None,
-        )
-        .await?;
-    let _: serde_json::Value = db
-        .create_obj(
-            &orders_col,
-            Some("o2"),
-            &json!({"user_id": "u1", "amount": 200}),
-            None,
-        )
-        .await?;
-    let _: serde_json::Value = db
-        .create_obj(
-            &orders_col,
-            Some("o3"),
-            &json!({"user_id": "u2", "amount": 50}),
-            None,
-        )
-        .await?;
+    create_test_doc(
+        &db,
+        &orders_col,
+        "o1",
+        &json!({"user_id": "u1", "amount": 100}),
+    )
+    .await?;
+    create_test_doc(
+        &db,
+        &orders_col,
+        "o2",
+        &json!({"user_id": "u1", "amount": 200}),
+    )
+    .await?;
+    create_test_doc(
+        &db,
+        &orders_col,
+        "o3",
+        &json!({"user_id": "u2", "amount": 50}),
+    )
+    .await?;
 
     let sql =
         format!("SELECT * FROM {users_col} u INNER JOIN {orders_col} o ON u.__name__ = o.user_id");
@@ -684,24 +684,17 @@ async fn emulator_left_join() -> Result<(), Box<dyn std::error::Error>> {
     let users_col = format!("fireql_ljoin_users_{suffix}");
     let orders_col = format!("fireql_ljoin_orders_{suffix}");
 
-    let _: serde_json::Value = db
-        .create_obj(&users_col, Some("u1"), &json!({"name": "Alice"}), None)
-        .await?;
-    let _: serde_json::Value = db
-        .create_obj(&users_col, Some("u2"), &json!({"name": "Bob"}), None)
-        .await?;
-    let _: serde_json::Value = db
-        .create_obj(&users_col, Some("u3"), &json!({"name": "Charlie"}), None)
-        .await?;
+    create_test_doc(&db, &users_col, "u1", &json!({"name": "Alice"})).await?;
+    create_test_doc(&db, &users_col, "u2", &json!({"name": "Bob"})).await?;
+    create_test_doc(&db, &users_col, "u3", &json!({"name": "Charlie"})).await?;
 
-    let _: serde_json::Value = db
-        .create_obj(
-            &orders_col,
-            Some("o1"),
-            &json!({"user_id": "u1", "amount": 100}),
-            None,
-        )
-        .await?;
+    create_test_doc(
+        &db,
+        &orders_col,
+        "o1",
+        &json!({"user_id": "u1", "amount": 100}),
+    )
+    .await?;
 
     let sql =
         format!("SELECT * FROM {users_col} u LEFT JOIN {orders_col} o ON u.__name__ = o.user_id");
@@ -747,19 +740,16 @@ async fn emulator_or_independent_in_filters() -> Result<(), Box<dyn std::error::
         ("y1", "c", "y"),
         ("none", "c", "z"),
     ] {
-        let _: serde_json::Value = db
-            .create_obj(
-                &collection,
-                Some(id),
-                &json!({ "status": status, "role": role }),
-                None,
-            )
-            .await?;
+        create_test_doc(
+            &db,
+            &collection,
+            id,
+            &json!({ "status": status, "role": role }),
+        )
+        .await?;
     }
 
-    let sql = format!(
-        "SELECT * FROM {collection} WHERE status IN ('a','b') OR role IN ('x','y')"
-    );
+    let sql = format!("SELECT * FROM {collection} WHERE status IN ('a','b') OR role IN ('x','y')");
     let output = fireql.execute(&sql).await?;
     match output {
         FireqlOutput::Rows(mut rows) => {
@@ -796,14 +786,13 @@ async fn emulator_or_in_and_array_contains_any() -> Result<(), Box<dyn std::erro
         ("by_tags", "z", json!(["sql", "cli"])),
         ("neither", "z", json!(["python"])),
     ] {
-        let _: serde_json::Value = db
-            .create_obj(
-                &collection,
-                Some(id),
-                &json!({ "status": status, "tags": tags }),
-                None,
-            )
-            .await?;
+        create_test_doc(
+            &db,
+            &collection,
+            id,
+            &json!({ "status": status, "tags": tags }),
+        )
+        .await?;
     }
 
     // Independent disjunction filters across OR branches: IN on one side,
@@ -843,20 +832,18 @@ async fn emulator_or_with_not_in_is_rejected_by_firestore() -> Result<(), Box<dy
     };
 
     let collection = format!("fireql_or_notin_{}", unique_suffix());
-    let _: serde_json::Value = db
-        .create_obj(
-            &collection,
-            Some("d1"),
-            &json!({ "status": "a", "role": "x" }),
-            None,
-        )
-        .await?;
+    create_test_doc(
+        &db,
+        &collection,
+        "d1",
+        &json!({ "status": "a", "role": "x" }),
+    )
+    .await?;
 
     // fireql accepts NOT IN in an OR branch (per-branch validation), but
     // Firestore rejects NOT_IN combined with OR. Surface that as a Firestore error.
-    let sql = format!(
-        "SELECT * FROM {collection} WHERE status NOT IN ('gone') OR role IN ('x','y')"
-    );
+    let sql =
+        format!("SELECT * FROM {collection} WHERE status NOT IN ('gone') OR role IN ('x','y')");
     let err = fireql
         .execute(&sql)
         .await
@@ -890,9 +877,7 @@ async fn emulator_rejects_multiple_in_within_same_branch() -> Result<(), Box<dyn
     let collection = format!("fireql_or_reject_{}", unique_suffix());
     // Two IN filters in one conjunction exceed Firestore's per-branch limit
     // and must fail in fireql validation before the emulator is contacted.
-    let sql = format!(
-        "SELECT * FROM {collection} WHERE status IN ('a','b') AND role IN ('x','y')"
-    );
+    let sql = format!("SELECT * FROM {collection} WHERE status IN ('a','b') AND role IN ('x','y')");
     let err = fireql
         .execute(&sql)
         .await
@@ -901,6 +886,71 @@ async fn emulator_rejects_multiple_in_within_same_branch() -> Result<(), Box<dyn
         matches!(err, FireqlError::InvalidQuery(_)),
         "expected InvalidQuery, got {err}"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_aggregation_count_sum_avg() -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let collection = format!("fireql_agg_{}", unique_suffix());
+    create_test_doc(
+        &db,
+        &collection,
+        "d1",
+        &json!({"score": 10, "active": true}),
+    )
+    .await?;
+    create_test_doc(
+        &db,
+        &collection,
+        "d2",
+        &json!({"score": 20, "active": true}),
+    )
+    .await?;
+    create_test_doc(
+        &db,
+        &collection,
+        "d3",
+        &json!({"score": 30, "active": false}),
+    )
+    .await?;
+
+    let count_sql = format!("SELECT COUNT(*) AS total FROM {collection}");
+    let output = fireql.execute(&count_sql).await?;
+    match output {
+        FireqlOutput::Aggregation(data) => {
+            assert_eq!(data.get("total"), Some(&FireqlValue::Integer(3)));
+        }
+        other => panic!("expected aggregation output, got {other:?}"),
+    }
+
+    let filter_agg_sql = format!(
+        "SELECT COUNT(*) AS cnt, SUM(score) AS total_score, AVG(score) AS avg_score FROM {collection} WHERE active = true"
+    );
+    let output = fireql.execute(&filter_agg_sql).await?;
+    match output {
+        FireqlOutput::Aggregation(data) => {
+            assert_eq!(data.get("cnt"), Some(&FireqlValue::Integer(2)));
+            assert_eq!(data.get("total_score"), Some(&FireqlValue::Integer(30)));
+            assert_eq!(data.get("avg_score"), Some(&FireqlValue::Double(15.0)));
+        }
+        other => panic!("expected aggregation output, got {other:?}"),
+    }
 
     Ok(())
 }

@@ -1,10 +1,11 @@
 use super::doc_name::parse_doc_name;
+use super::select::stream_planned_select;
 use crate::error::{FireqlError, Result};
 use crate::output::FireqlOutput;
-use crate::planner::{build_query_params, sql_value_to_firestore};
+use crate::planner::{plan_select, sql_value_to_firestore};
 use crate::sql::{CollectionSpec, FilterExpr, OrderBy, SqlValue};
 use firestore::errors::FirestoreError;
-use firestore::{firestore_document_from_map, FirestoreDb, FirestoreQuerySupport};
+use firestore::{firestore_document_from_map, FirestoreDb};
 use futures::stream::{self, StreamExt, TryStreamExt};
 use gcloud_sdk::google::firestore::v1::{document_transform, write, DocumentMask, Write};
 use gcloud_sdk::google::rpc::Status;
@@ -146,7 +147,7 @@ pub(super) async fn execute_batch_write(
     batch_parallelism: usize,
     op: BatchOp,
 ) -> Result<FireqlOutput> {
-    let params = build_query_params(
+    let planned = plan_select(
         collection,
         Some(filter),
         order_by,
@@ -157,8 +158,7 @@ pub(super) async fn execute_batch_write(
 
     // Stream the query so only document names are kept in memory; the full
     // document bodies are dropped as each result arrives.
-    let doc_names: Vec<String> = db
-        .stream_query_doc_with_errors(params)
+    let doc_names: Vec<String> = stream_planned_select(db, planned)
         .await?
         .map_ok(|doc| doc.name)
         .try_collect()
