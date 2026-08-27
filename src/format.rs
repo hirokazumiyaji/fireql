@@ -37,6 +37,21 @@ fn collect_field_names(rows: &[DocOutput]) -> Vec<String> {
     names.into_iter().collect()
 }
 
+/// CSV headers use only the first row's fields so rows can be written without
+/// scanning the full result set first (#28). Later rows omit values for fields
+/// that appear only on the first row, and fields unique to later rows are not
+/// emitted as columns. Table output still unions all fields for display.
+fn collect_field_names_first_row(rows: &[DocOutput]) -> Vec<String> {
+    match rows.first() {
+        Some(row) => {
+            let mut names: Vec<String> = row.data.keys().cloned().collect();
+            names.sort();
+            names
+        }
+        None => Vec::new(),
+    }
+}
+
 fn aggregation_row(map: &HashMap<String, FireqlValue>) -> (Vec<&String>, Vec<String>) {
     let mut keys: Vec<&String> = map.keys().collect();
     keys.sort();
@@ -58,7 +73,7 @@ fn escape_formula_cell(text: String) -> String {
     }
 }
 
-fn build_row_data(rows: &[DocOutput], escape_formulas: bool) -> (Vec<String>, Vec<Vec<String>>) {
+fn row_record(row: &DocOutput, field_names: &[String], escape_formulas: bool) -> Vec<String> {
     let escape = |text: String| {
         if escape_formulas {
             escape_formula_cell(text)
@@ -67,7 +82,25 @@ fn build_row_data(rows: &[DocOutput], escape_formulas: bool) -> (Vec<String>, Ve
         }
     };
 
-    let field_names = collect_field_names(rows);
+    let mut record = vec![escape(row.id.clone()), escape(row.path.clone())];
+    for field in field_names {
+        let cell = match row.data.get(field) {
+            Some(v @ (FireqlValue::String(_) | FireqlValue::Reference(_))) => {
+                escape(v.to_plain_string())
+            }
+            Some(v) => v.to_plain_string(),
+            None => String::new(),
+        };
+        record.push(cell);
+    }
+    record
+}
+
+fn build_row_data(
+    rows: &[DocOutput],
+    field_names: Vec<String>,
+    escape_formulas: bool,
+) -> (Vec<String>, Vec<Vec<String>>) {
     // Headers are fireql-generated (`id`, `path`, `data.{field}`); the prefix
     // keeps them outside CSV formula-injection rules, unlike document values.
     let mut header = vec!["id".to_string(), "path".to_string()];
@@ -75,20 +108,7 @@ fn build_row_data(rows: &[DocOutput], escape_formulas: bool) -> (Vec<String>, Ve
 
     let data_rows: Vec<Vec<String>> = rows
         .iter()
-        .map(|row| {
-            let mut record = vec![escape(row.id.clone()), escape(row.path.clone())];
-            for field in &field_names {
-                let cell = match row.data.get(field) {
-                    Some(v @ (FireqlValue::String(_) | FireqlValue::Reference(_))) => {
-                        escape(v.to_plain_string())
-                    }
-                    Some(v) => v.to_plain_string(),
-                    None => String::new(),
-                };
-                record.push(cell);
-            }
-            record
-        })
+        .map(|row| row_record(row, &field_names, escape_formulas))
         .collect();
 
     (header, data_rows)
@@ -102,7 +122,8 @@ fn format_csv(output: &FireqlOutput) -> Result<String> {
             if rows.is_empty() {
                 return Ok(String::new());
             }
-            let (header, data_rows) = build_row_data(rows, true);
+            let field_names = collect_field_names_first_row(rows);
+            let (header, data_rows) = build_row_data(rows, field_names, true);
             wtr.write_record(&header).map_err(csv_error)?;
             for record in &data_rows {
                 wtr.write_record(record).map_err(csv_error)?;
@@ -134,6 +155,39 @@ fn csv_error(e: csv::Error) -> crate::error::FireqlError {
     crate::error::FireqlError::Format(e.to_string())
 }
 
+/// Writes SELECT rows as CSV using the first row's field set as the header.
+/// Suitable for streaming: once the header is written, each subsequent row is
+/// flushed independently without a full-field union scan.
+pub fn write_csv_rows<W: std::io::Write>(
+    rows: impl IntoIterator<Item = DocOutput>,
+    mut out: W,
+) -> Result<()> {
+    let mut rows = rows.into_iter();
+    let Some(first) = rows.next() else {
+        return Ok(());
+    };
+
+    let field_names = {
+        let mut names: Vec<String> = first.data.keys().cloned().collect();
+        names.sort();
+        names
+    };
+    let mut header = vec!["id".to_string(), "path".to_string()];
+    header.extend(field_names.iter().map(|f| format!("data.{f}")));
+
+    let mut wtr = csv::Writer::from_writer(&mut out);
+    wtr.write_record(&header).map_err(csv_error)?;
+    wtr.write_record(row_record(&first, &field_names, true))
+        .map_err(csv_error)?;
+    for row in rows {
+        wtr.write_record(row_record(&row, &field_names, true))
+            .map_err(csv_error)?;
+    }
+    wtr.flush()
+        .map_err(|e| crate::error::FireqlError::Format(e.to_string()))?;
+    Ok(())
+}
+
 /// Firestore strings may embed ANSI/OSC escape sequences that rewrite the
 /// operator's terminal when rendered. Table output is display-only, so drop
 /// control characters (keeping newline and tab, which comfy-table renders
@@ -161,7 +215,8 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
             if rows.is_empty() {
                 return Ok(String::new());
             }
-            let (header, data_rows) = build_row_data(rows, false);
+            let field_names = collect_field_names(rows);
+            let (header, data_rows) = build_row_data(rows, field_names, false);
 
             let mut table = new_table();
             table.set_header(header.iter().map(|h| strip_control_chars(h)));
@@ -412,16 +467,29 @@ mod tests {
     }
 
     #[test]
-    fn csv_heterogeneous_fields_uses_union() {
+    fn csv_heterogeneous_fields_uses_first_row() {
         let output = multi_rows_heterogeneous();
         let result = Format::Csv.format(&output, false).unwrap();
         let lines: Vec<&str> = result.trim().lines().collect();
         assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0], "id,path,data.age,data.email,data.name");
-        // Alice has age but no email
-        assert_eq!(lines[1], "u1,users/u1,30,,Alice");
-        // Bob has email but no age
-        assert_eq!(lines[2], "u2,users/u2,,bob@example.com,Bob");
+        // First row has age+name; Bob's email is omitted from the header.
+        assert_eq!(lines[0], "id,path,data.age,data.name");
+        assert_eq!(lines[1], "u1,users/u1,30,Alice");
+        assert_eq!(lines[2], "u2,users/u2,,Bob");
+    }
+
+    #[test]
+    fn write_csv_rows_streams_with_first_row_header() {
+        let FireqlOutput::Rows(rows) = multi_rows_heterogeneous() else {
+            panic!("expected rows");
+        };
+        let mut buf = Vec::new();
+        write_csv_rows(rows, &mut buf).unwrap();
+        let result = String::from_utf8(buf).unwrap();
+        let lines: Vec<&str> = result.trim().lines().collect();
+        assert_eq!(lines[0], "id,path,data.age,data.name");
+        assert_eq!(lines[1], "u1,users/u1,30,Alice");
+        assert_eq!(lines[2], "u2,users/u2,,Bob");
     }
 
     #[test]

@@ -1,7 +1,7 @@
 use clap::Parser;
-use fireql::{Fireql, FireqlConfig, FireqlError};
+use fireql::{write_csv_rows, Fireql, FireqlConfig, FireqlError, FireqlOutput, Format};
 use std::env;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
 #[derive(Debug, Parser)]
@@ -71,8 +71,19 @@ async fn run() -> Result<(), FireqlError> {
     let fireql = Fireql::new(config).await?;
     let output = fireql.execute(&sql).await?;
 
-    let formatted = cli.format.format(&output, cli.pretty)?;
-    println!("{formatted}");
+    // CSV row output streams through the writer using the first row's fields
+    // as the header, avoiding a second full-field-union pass (#28).
+    match (cli.format, output) {
+        (Format::Csv, FireqlOutput::Rows(rows)) => {
+            let mut stdout = io::stdout().lock();
+            write_csv_rows(rows, &mut stdout)?;
+            stdout.flush()?;
+        }
+        (format, output) => {
+            let formatted = format.format(&output, cli.pretty)?;
+            println!("{formatted}");
+        }
+    }
     Ok(())
 }
 
