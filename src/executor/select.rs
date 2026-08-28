@@ -7,7 +7,7 @@ use crate::sql::{FilterExpr, JoinSpec, Projection, SelectProjection, SqlValue};
 use crate::value::FireqlValue;
 use firestore::FirestoreDb;
 use futures::stream::BoxStream;
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use gcloud_sdk::google::firestore::v1::Document;
 use std::collections::HashSet;
 
@@ -38,6 +38,37 @@ pub(super) async fn stream_planned_select<'b>(
     Ok(q.stream_query_with_errors().await?)
 }
 
+/// Streams a plain SELECT (fields projection, no JOIN) as `DocOutput`s as
+/// documents arrive from Firestore (#55). The stream borrows only `db`, so
+/// callers may consume it while the parsed statement is dropped.
+pub(super) async fn stream_select_rows<'a>(
+    db: &'a FirestoreDb,
+    stmt: &crate::sql::SelectStatement,
+) -> Result<BoxStream<'a, Result<DocOutput>>> {
+    let projection = match &stmt.projection {
+        SelectProjection::Fields(projection) => projection,
+        SelectProjection::Aggregations(_) => {
+            return Err(FireqlError::Unsupported(
+                "aggregation results cannot be streamed as rows".to_string(),
+            ))
+        }
+    };
+    let planned = plan_select(
+        &stmt.collection,
+        stmt.filter.as_ref(),
+        &stmt.order_by,
+        stmt.limit,
+        Some(projection),
+        Some(db.get_documents_path().as_str()),
+    )?;
+
+    Ok(stream_planned_select(db, planned)
+        .await?
+        .map_err(FireqlError::from)
+        .and_then(|doc| async move { doc_to_output(doc) })
+        .boxed())
+}
+
 pub(super) async fn execute_select(
     db: &FirestoreDb,
     stmt: crate::sql::SelectStatement,
@@ -47,25 +78,11 @@ pub(super) async fn execute_select(
     }
 
     match &stmt.projection {
-        SelectProjection::Fields(projection) => {
-            let planned = plan_select(
-                &stmt.collection,
-                stmt.filter.as_ref(),
-                &stmt.order_by,
-                stmt.limit,
-                Some(projection),
-                Some(db.get_documents_path().as_str()),
-            )?;
-
+        SelectProjection::Fields(_) => {
             // Stream document bodies so callers that later write row-by-row
             // (JSON) do not force an intermediate all-at-once Firestore fetch
             // API; CSV/Table still buffer via FireqlOutput::Rows today (#28).
-            let rows: Vec<DocOutput> = stream_planned_select(db, planned)
-                .await?
-                .map_err(FireqlError::from)
-                .and_then(|doc| async move { doc_to_output(doc) })
-                .try_collect()
-                .await?;
+            let rows: Vec<DocOutput> = stream_select_rows(db, &stmt).await?.try_collect().await?;
             Ok(FireqlOutput::Rows(rows))
         }
         SelectProjection::Aggregations(aggregations) => {

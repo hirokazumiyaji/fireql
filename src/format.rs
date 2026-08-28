@@ -1,6 +1,7 @@
 use crate::error::Result;
 use crate::output::{DocOutput, FireqlOutput};
 use crate::value::FireqlValue;
+use futures::StreamExt;
 use std::collections::HashMap;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, clap::ValueEnum)]
@@ -157,7 +158,8 @@ fn csv_error(e: csv::Error) -> crate::error::FireqlError {
 
 /// Writes SELECT rows as CSV using the first row's field set as the header.
 /// Suitable for streaming: once the header is written, each subsequent row is
-/// flushed independently without a full-field union scan.
+/// written and flushed independently without a full-field union scan, so
+/// consumers observe rows as they are handed to the writer (#28, #55).
 pub fn write_csv_rows<W: std::io::Write>(
     rows: impl IntoIterator<Item = DocOutput>,
     mut out: W,
@@ -167,25 +169,126 @@ pub fn write_csv_rows<W: std::io::Write>(
         return Ok(());
     };
 
-    let field_names = {
-        let mut names: Vec<String> = first.data.keys().cloned().collect();
-        names.sort();
-        names
-    };
-    let mut header = vec!["id".to_string(), "path".to_string()];
-    header.extend(field_names.iter().map(|f| format!("data.{f}")));
+    let field_names = first_row_field_names(&first);
+    let header = csv_header(&field_names);
 
     let mut wtr = csv::Writer::from_writer(&mut out);
     wtr.write_record(&header).map_err(csv_error)?;
     wtr.write_record(row_record(&first, &field_names, true))
         .map_err(csv_error)?;
+    flush_csv(&mut wtr)?;
     for row in rows {
         wtr.write_record(row_record(&row, &field_names, true))
             .map_err(csv_error)?;
+        flush_csv(&mut wtr)?;
     }
-    wtr.flush()
-        .map_err(|e| crate::error::FireqlError::Format(e.to_string()))?;
     Ok(())
+}
+
+fn first_row_field_names(row: &DocOutput) -> Vec<String> {
+    let mut names: Vec<String> = row.data.keys().cloned().collect();
+    names.sort();
+    names
+}
+
+fn csv_header(field_names: &[String]) -> Vec<String> {
+    // Headers are fireql-generated (`id`, `path`, `data.{field}`); the prefix
+    // keeps them outside CSV formula-injection rules, unlike document values.
+    let mut header = vec!["id".to_string(), "path".to_string()];
+    header.extend(field_names.iter().map(|f| format!("data.{f}")));
+    header
+}
+
+fn flush_csv<W: std::io::Write>(wtr: &mut csv::Writer<W>) -> Result<()> {
+    wtr.flush()
+        .map_err(|e| crate::error::FireqlError::Format(e.to_string()))
+}
+
+/// Streams SELECT rows as CSV as they arrive, flushing after every row so
+/// downstream consumers observe documents incrementally (#55). Uses the first
+/// row's field set as the header (#28) and produces the same bytes as
+/// [`write_csv_rows`]. Writes nothing for an empty stream.
+pub async fn write_csv_rows_stream<S, W>(mut rows: S, out: W) -> Result<()>
+where
+    S: futures::Stream<Item = Result<DocOutput>> + Unpin,
+    W: std::io::Write,
+{
+    let mut wtr = csv::Writer::from_writer(out);
+    let mut field_names = Vec::new();
+    let mut first = true;
+
+    while let Some(row) = rows.next().await {
+        let row = row?;
+        if first {
+            field_names = first_row_field_names(&row);
+            wtr.write_record(csv_header(&field_names))
+                .map_err(csv_error)?;
+            first = false;
+        }
+        wtr.write_record(row_record(&row, &field_names, true))
+            .map_err(csv_error)?;
+        flush_csv(&mut wtr)?;
+    }
+    Ok(())
+}
+
+/// Streams SELECT rows as a JSON array, writing and flushing each element as
+/// it arrives (#55). Byte-identical to `Format::Json.format(&FireqlOutput::Rows(..), pretty)`
+/// for the same rows in both compact and pretty modes. Does not write a
+/// trailing newline.
+pub async fn write_json_rows_stream<S, W>(mut rows: S, mut out: W, pretty: bool) -> Result<()>
+where
+    S: futures::Stream<Item = Result<DocOutput>> + Unpin,
+    W: std::io::Write,
+{
+    if let Some(first) = rows.next().await {
+        let first = first?;
+        let sep: &[u8] = if pretty { b",\n" } else { b"," };
+        let close: &[u8] = if pretty { b"\n]" } else { b"]" };
+
+        if pretty {
+            out.write_all(b"[\n")?;
+            out.write_all(
+                indent_pretty_element(&serde_json::to_string_pretty(&first)?).as_bytes(),
+            )?;
+        } else {
+            out.write_all(b"[")?;
+            out.write_all(serde_json::to_string(&first)?.as_bytes())?;
+        }
+        out.flush()?;
+
+        while let Some(row) = rows.next().await {
+            let row = row?;
+            out.write_all(sep)?;
+            if pretty {
+                out.write_all(
+                    indent_pretty_element(&serde_json::to_string_pretty(&row)?).as_bytes(),
+                )?;
+            } else {
+                out.write_all(serde_json::to_string(&row)?.as_bytes())?;
+            }
+            out.flush()?;
+        }
+        out.write_all(close)?;
+    } else {
+        out.write_all(b"[]")?;
+    }
+    out.flush()?;
+    Ok(())
+}
+
+/// Indents a pretty-printed JSON element by two spaces so it matches how
+/// `serde_json` renders elements inside a pretty-printed array.
+fn indent_pretty_element(json: &str) -> String {
+    let mut indented = String::with_capacity(json.len());
+    for line in json.lines() {
+        indented.push_str("  ");
+        indented.push_str(line);
+        indented.push('\n');
+    }
+    // Drop the trailing newline; the caller joins elements with ",\n".
+    indented.pop();
+    indented
 }
 
 /// Firestore strings may embed ANSI/OSC escape sequences that rewrite the
@@ -247,6 +350,7 @@ fn format_table(output: &FireqlOutput) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::error::FireqlError;
     use crate::value::FireqlValue;
     use std::collections::HashMap;
 
@@ -630,5 +734,137 @@ mod tests {
         assert!(!result.contains('\u{1b}'));
         assert!(!result.contains('\u{7}'));
         assert!(result.contains("click me"));
+    }
+
+    fn streaming_rows(count: usize) -> Vec<DocOutput> {
+        (0..count)
+            .map(|i| {
+                let mut data = HashMap::new();
+                data.insert("name".to_string(), FireqlValue::String(format!("n{i}")));
+                data.insert("age".to_string(), FireqlValue::Integer(i as i64));
+                DocOutput {
+                    id: format!("d{i}"),
+                    path: format!("c/d{i}"),
+                    data,
+                }
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn write_json_rows_stream_matches_buffered_format() {
+        for pretty in [false, true] {
+            for count in [0, 1, 3] {
+                let rows = streaming_rows(count);
+                let expected = format_json(&FireqlOutput::Rows(rows.clone()), pretty).unwrap();
+
+                let mut buf = Vec::new();
+                write_json_rows_stream(
+                    futures::stream::iter(rows.into_iter().map(Ok)),
+                    &mut buf,
+                    pretty,
+                )
+                .await
+                .unwrap();
+
+                assert_eq!(
+                    String::from_utf8(buf).unwrap(),
+                    expected,
+                    "pretty={pretty} count={count}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn write_json_rows_stream_surfaces_stream_errors() {
+        let rows: Vec<Result<DocOutput>> = vec![Err(FireqlError::Unsupported("boom".into()))];
+        let mut buf = Vec::new();
+        let err = write_json_rows_stream(futures::stream::iter(rows), &mut buf, false)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    #[tokio::test]
+    async fn write_csv_rows_stream_matches_write_csv_rows() {
+        for count in [0, 1, 3] {
+            let rows = streaming_rows(count);
+
+            let mut expected = Vec::new();
+            write_csv_rows(rows.clone(), &mut expected).unwrap();
+
+            let mut buf = Vec::new();
+            write_csv_rows_stream(futures::stream::iter(rows.into_iter().map(Ok)), &mut buf)
+                .await
+                .unwrap();
+
+            assert_eq!(buf, expected, "count={count}");
+        }
+    }
+
+    /// Records `flush` calls so tests can verify rows become visible to the
+    /// underlying writer one by one.
+    struct FlushRecorder {
+        inner: Vec<u8>,
+        flushes: usize,
+    }
+
+    impl FlushRecorder {
+        fn new() -> Self {
+            Self {
+                inner: Vec::new(),
+                flushes: 0,
+            }
+        }
+    }
+
+    impl std::io::Write for FlushRecorder {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.flushes += 1;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn write_csv_rows_stream_flushes_after_each_row() {
+        let rows = streaming_rows(3);
+        let mut recorder = FlushRecorder::new();
+        write_csv_rows_stream(
+            futures::stream::iter(rows.into_iter().map(Ok)),
+            &mut recorder,
+        )
+        .await
+        .unwrap();
+
+        // Header + first row, then one flush per subsequent row.
+        assert!(
+            recorder.flushes >= 3,
+            "expected at least one flush per row, got {}",
+            recorder.flushes
+        );
+    }
+
+    #[tokio::test]
+    async fn write_json_rows_stream_flushes_after_each_element() {
+        let rows = streaming_rows(3);
+        let mut recorder = FlushRecorder::new();
+        write_json_rows_stream(
+            futures::stream::iter(rows.into_iter().map(Ok)),
+            &mut recorder,
+            false,
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            recorder.flushes >= 3,
+            "expected at least one flush per element, got {}",
+            recorder.flushes
+        );
     }
 }

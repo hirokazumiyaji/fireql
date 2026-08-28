@@ -1,5 +1,9 @@
 use clap::Parser;
-use fireql::{write_csv_rows, Fireql, FireqlConfig, FireqlError, FireqlOutput, Format};
+use fireql::{
+    write_csv_rows_stream, write_json_rows_stream, DocOutput, Fireql, FireqlConfig, FireqlError,
+    FireqlOutput, FireqlStream, Format,
+};
+use futures::TryStreamExt;
 use std::env;
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
@@ -69,21 +73,30 @@ async fn run() -> Result<(), FireqlError> {
     };
 
     let fireql = Fireql::new(config).await?;
-    let output = fireql.execute(&sql).await?;
 
-    // CSV row output streams through the writer using the first row's fields
-    // as the header, avoiding a second full-field-union pass (#28).
-    match (cli.format, output) {
-        (Format::Csv, FireqlOutput::Rows(rows)) => {
-            let mut stdout = io::stdout().lock();
-            write_csv_rows(rows, &mut stdout)?;
-            stdout.flush()?;
-        }
-        (format, output) => {
-            let formatted = format.format(&output, cli.pretty)?;
-            println!("{formatted}");
+    // SELECT rows stream to stdout as documents arrive (#55); CSV and JSON
+    // flush row-by-row so the memory footprint stays constant. Table output
+    // needs the full field union, so it buffers once before rendering.
+    let mut stdout = io::stdout().lock();
+    match fireql.execute_stream(&sql).await? {
+        FireqlStream::Rows(rows) => match cli.format {
+            Format::Csv => write_csv_rows_stream(rows, &mut stdout).await?,
+            Format::Json => {
+                write_json_rows_stream(rows, &mut stdout, cli.pretty).await?;
+                stdout.write_all(b"\n")?;
+            }
+            Format::Table => {
+                let rows: Vec<DocOutput> = rows.try_collect().await?;
+                let formatted = Format::Table.format(&FireqlOutput::Rows(rows), cli.pretty)?;
+                writeln!(stdout, "{formatted}")?;
+            }
+        },
+        FireqlStream::Completed(output) => {
+            let formatted = cli.format.format(&output, cli.pretty)?;
+            writeln!(stdout, "{formatted}")?;
         }
     }
+    stdout.flush()?;
     Ok(())
 }
 
