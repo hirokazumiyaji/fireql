@@ -28,7 +28,7 @@ cat query.sql | ./target/release/fireql --project-id my-project
 
 | Option | Description |
 |---|---|
-| `--project-id` | GCP project ID (required; can also use env vars `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT`) |
+| `--project-id` | GCP project ID (required; can also use env vars `FIRESTORE_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT`) |
 | `--database-id` | Firestore database ID (defaults to `(default)`) |
 | `--credentials` | Path to a service account JSON key file |
 | `--sql` | SQL query string (reads from stdin if omitted) |
