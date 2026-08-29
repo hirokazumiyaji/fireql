@@ -33,6 +33,7 @@ cat query.sql | ./target/release/fireql --project-id my-project
 | `--credentials` | サービスアカウント JSON のパス |
 | `--sql` | SQL を直接渡す（省略時は stdin から読む） |
 | `--pretty` | JSON を整形出力 |
+| `--format` | 出力フォーマット（`json`（既定）/ `csv` / `table`） |
 | `--batch-parallelism` | UPDATE/DELETE のバッチ並列度（既定 1） |
 
 ### 認証
@@ -150,7 +151,7 @@ match output {
 - `INNER JOIN` / `LEFT JOIN` に対応
 - 結合条件は等値（`=`）のみ。`ON left.field = right.field` の形式で、`__name__`（document ID）も結合キーに使えます
 - 複数の JOIN を連結できます。2 つ目以降の JOIN の ON 句では、それまでに結合したテーブル（右側テーブルを含む）を左辺に参照でき、`o.__name__` のように先行テーブルの document ID も結合キーに使えます
-- 結合は **クライアント側** で実行されます。左側のクエリ結果から結合キーを集め、右側を `IN`（最大 10 件ずつ分割）で取得してハッシュ結合します
+- 結合は **クライアント側** で実行されます。左側のクエリ結果から結合キーを集め、右側を `IN`（最大 30 件ずつ分割）で取得してハッシュ結合します
 - 出力フィールドはテーブル別名（または collection ID）で接頭辞が付きます（例: `users.name`, `orders.amount`）。結合したテーブルの document ID は `{別名}.__name__` として出力されます
 
 ```sql

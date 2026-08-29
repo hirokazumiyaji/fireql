@@ -33,6 +33,7 @@ cat query.sql | ./target/release/fireql --project-id my-project
 | `--credentials` | Path to a service account JSON key file |
 | `--sql` | SQL query string (reads from stdin if omitted) |
 | `--pretty` | Pretty-print JSON output |
+| `--format` | Output format (`json` (default) / `csv` / `table`) |
 | `--batch-parallelism` | Parallelism for UPDATE/DELETE batch writes (default 1) |
 
 ### Authentication
@@ -150,7 +151,7 @@ When `__name__` appears in the destination columns, the source document ID is re
 - `INNER JOIN` / `LEFT JOIN` are supported
 - Join conditions must be equality (`=`) only, in the form `ON left.field = right.field`; `__name__` (document ID) can be used as a join key
 - Multiple JOINs can be chained. In the second and later ON clauses, any previously joined table (including right-side ones) can appear on the left; a prior table's document ID can be referenced as `o.__name__`
-- Joins run **client-side**: join keys are collected from the left query result, the right side is fetched via `IN` (chunked into groups of 10), and the rows are hash-joined
+- Joins run **client-side**: join keys are collected from the left query result, the right side is fetched via `IN` (chunked into groups of 30), and the rows are hash-joined
 - Output fields are prefixed with the table alias (or collection ID), e.g. `users.name`, `orders.amount`. A joined table's document ID is emitted as `{alias}.__name__`
 
 ```sql
