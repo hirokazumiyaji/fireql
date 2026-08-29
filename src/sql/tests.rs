@@ -596,6 +596,92 @@ fn parse_join_with_alias() {
 }
 
 #[test]
+fn parse_chained_join_reverses_right_table_on_left_side_of_on() {
+    let sql = "SELECT * FROM users u \
+               INNER JOIN orders o ON u.__name__ = o.user_id \
+               INNER JOIN items i ON i.order_id = o.__name__";
+    let stmt = parse_sql(sql).unwrap();
+    match stmt {
+        StatementAst::Select(select) => {
+            let join = select.joins.as_ref().expect("should have joins");
+            assert_eq!(join.len(), 2);
+            // 2 つ目の JOIN: `i.order_id = o.__name__` は右側テーブル (i) が
+            // 左辺にあるため、`o.__name__ = i.order_id` として解釈される。
+            assert_eq!(join[1].collection.collection_id, "items");
+            assert_eq!(join[1].left_field, "__name__");
+            assert_eq!(join[1].left_alias.as_deref(), Some("o"));
+            assert_eq!(join[1].right_field, "order_id");
+            assert_eq!(join[1].right_alias.as_deref(), Some("i"));
+        }
+        _ => panic!("expected select"),
+    }
+}
+
+#[test]
+fn parse_chained_join_keeps_preceding_table_on_left_side_of_on() {
+    let sql = "SELECT * FROM users u \
+               INNER JOIN orders o ON u.__name__ = o.user_id \
+               INNER JOIN items i ON o.__name__ = i.order_id";
+    let stmt = parse_sql(sql).unwrap();
+    match stmt {
+        StatementAst::Select(select) => {
+            let join = select.joins.as_ref().expect("should have joins");
+            assert_eq!(join.len(), 2);
+            assert_eq!(join[1].collection.collection_id, "items");
+            assert_eq!(join[1].left_field, "__name__");
+            assert_eq!(join[1].left_alias.as_deref(), Some("o"));
+            assert_eq!(join[1].right_field, "order_id");
+            assert_eq!(join[1].right_alias.as_deref(), Some("i"));
+        }
+        _ => panic!("expected select"),
+    }
+}
+
+#[test]
+fn parse_chained_join_without_alias_reverses_right_table_on_left_side_of_on() {
+    let sql = "SELECT * FROM users \
+               INNER JOIN orders ON users.id = orders.user_id \
+               INNER JOIN items ON items.order_id = orders.id";
+    let stmt = parse_sql(sql).unwrap();
+    match stmt {
+        StatementAst::Select(select) => {
+            let join = select.joins.as_ref().expect("should have joins");
+            assert_eq!(join.len(), 2);
+            // 2 つ目の JOIN: `items.order_id = orders.id` は右側テーブル
+            // (items) が左辺にあるため、`orders.id = items.order_id` として
+            // 解釈される。
+            assert_eq!(join[1].collection.collection_id, "items");
+            assert_eq!(join[1].left_field, "id");
+            assert_eq!(join[1].left_alias.as_deref(), Some("orders"));
+            assert_eq!(join[1].right_field, "order_id");
+            assert_eq!(join[1].right_alias.as_deref(), Some("items"));
+        }
+        _ => panic!("expected select"),
+    }
+}
+
+#[test]
+fn parse_chained_join_second_on_referencing_leading_table_is_reversed() {
+    let sql = "SELECT * FROM users u \
+               INNER JOIN orders o ON u.__name__ = o.user_id \
+               INNER JOIN items i ON i.item_ref = u.dept_id";
+    let stmt = parse_sql(sql).unwrap();
+    match stmt {
+        StatementAst::Select(select) => {
+            let join = select.joins.as_ref().expect("should have joins");
+            assert_eq!(join.len(), 2);
+            // 2 つ目の JOIN: `i.item_ref = u.dept_id` は右側テーブル (i) が
+            // 左辺にあるため、`u.dept_id = i.item_ref` として解釈される。
+            assert_eq!(join[1].left_field, "dept_id");
+            assert_eq!(join[1].left_alias.as_deref(), Some("u"));
+            assert_eq!(join[1].right_field, "item_ref");
+            assert_eq!(join[1].right_alias.as_deref(), Some("i"));
+        }
+        _ => panic!("expected select"),
+    }
+}
+
+#[test]
 fn parse_join_rejects_unsupported_join_types() {
     let sql = "SELECT * FROM users RIGHT JOIN orders ON users.id = orders.user_id";
     let err = parse_sql(sql).unwrap_err();

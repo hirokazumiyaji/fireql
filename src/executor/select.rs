@@ -164,17 +164,29 @@ fn strip_alias_from_filter(filter: &FilterExpr, alias: &str) -> FilterExpr {
 
 /// Resolves the left-side join key for a join step against `current_result`.
 ///
-/// `__name__` always resolves to the leading table's `DocOutput.id`, which is
-/// preserved across every join, so it must stay unqualified even on chained
-/// joins. Regular fields, by contrast, are prefixed with their alias on chained
+/// `__name__` resolves to the leading table's `DocOutput.id`, which is
+/// preserved across every join, so it stays unqualified when the ON clause
+/// references the leading alias even on chained joins. When it references a
+/// previously joined right table (e.g. `o.__name__`), `hash_join` preserves
+/// that table's document id under `{alias}.__name__`, so the key resolves to
+/// the prefixed data field. A qualifier that refers to neither the leading
+/// table nor a joined table is rejected, since no row data can supply it.
+/// Regular fields, by contrast, are prefixed with their alias on chained
 /// joins because the left rows are already prefixed (e.g. `u.dept_id`).
-/// A previous right table's `__name__` cannot be used: that id is never retained.
-fn effective_left_join_field(join: &JoinSpec, is_joined: bool, left_alias: &str) -> Result<String> {
+fn effective_left_join_field(
+    join: &JoinSpec,
+    is_joined: bool,
+    left_alias: &str,
+    joined_names: &[String],
+) -> Result<String> {
     if join.left_field == "__name__" {
         let qualifier = join.left_alias.as_deref().unwrap_or(left_alias);
         if is_joined && qualifier != left_alias {
+            if joined_names.iter().any(|name| name == qualifier) {
+                return Ok(format!("{qualifier}.__name__"));
+            }
             return Err(FireqlError::Unsupported(format!(
-                "JOIN on `{qualifier}.__name__` is not supported; only the leading table's document id can be used as a join key"
+                "JOIN on `{qualifier}.__name__` is not supported; `{qualifier}` refers to neither the leading table nor a previously joined table"
             )));
         }
         Ok("__name__".to_string())
@@ -216,9 +228,14 @@ async fn execute_join_select(
 
     let mut current_result = left_docs;
     let mut is_joined = false;
+    // これまでに結合した右側テーブルの別名 (別名がなければコレクション名)。
+    // 後続の JOIN の ON 句が先行する右側テーブルの `__name__` を参照できるかの
+    // 判定に使う。
+    let mut joined_names: Vec<String> = Vec::with_capacity(joins.len());
 
     for join in joins {
-        let effective_left_field = effective_left_join_field(join, is_joined, left_alias)?;
+        let effective_left_field =
+            effective_left_join_field(join, is_joined, left_alias, &joined_names)?;
 
         let keys = extract_join_keys(&current_result, &effective_left_field)?;
         if keys.is_empty() && join.join_type == crate::sql::JoinType::Inner {
@@ -246,6 +263,7 @@ async fn execute_join_select(
         )?;
 
         is_joined = true;
+        joined_names.push(right_prefix.to_string());
     }
 
     retain_projected_fields(&mut current_result, &stmt.projection);
@@ -383,12 +401,12 @@ mod tests {
     fn effective_left_field_first_join_uses_field_as_is() {
         let name_join = join_spec("__name__", "user_id", Some("u"));
         assert_eq!(
-            effective_left_join_field(&name_join, false, "u").unwrap(),
+            effective_left_join_field(&name_join, false, "u", &[]).unwrap(),
             "__name__"
         );
         let field_join = join_spec("dept_id", "__name__", Some("u"));
         assert_eq!(
-            effective_left_join_field(&field_join, false, "u").unwrap(),
+            effective_left_join_field(&field_join, false, "u", &[]).unwrap(),
             "dept_id"
         );
     }
@@ -397,7 +415,7 @@ mod tests {
     fn effective_left_field_chained_name_resolves_to_leading_id() {
         let join = join_spec("__name__", "user_id", Some("u"));
         assert_eq!(
-            effective_left_join_field(&join, true, "u").unwrap(),
+            effective_left_join_field(&join, true, "u", &[]).unwrap(),
             "__name__"
         );
     }
@@ -406,15 +424,26 @@ mod tests {
     fn effective_left_field_chained_regular_field_is_prefixed() {
         let join = join_spec("dept_id", "__name__", Some("u"));
         assert_eq!(
-            effective_left_join_field(&join, true, "u").unwrap(),
+            effective_left_join_field(&join, true, "u", &[]).unwrap(),
             "u.dept_id"
         );
     }
 
     #[test]
-    fn effective_left_field_chained_prior_right_name_is_rejected() {
+    fn effective_left_field_chained_prior_right_name_resolves_to_prefixed_key() {
         let join = join_spec("__name__", "order_id", Some("o"));
-        let err = effective_left_join_field(&join, true, "u").unwrap_err();
+        let joined = vec!["o".to_string()];
+        assert_eq!(
+            effective_left_join_field(&join, true, "u", &joined).unwrap(),
+            "o.__name__"
+        );
+    }
+
+    #[test]
+    fn effective_left_field_chained_unknown_name_qualifier_is_rejected() {
+        let join = join_spec("__name__", "order_id", Some("x"));
+        let joined = vec!["o".to_string()];
+        let err = effective_left_join_field(&join, true, "u", &joined).unwrap_err();
         assert!(matches!(err, FireqlError::Unsupported(_)));
     }
 

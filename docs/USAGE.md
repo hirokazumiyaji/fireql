@@ -149,14 +149,16 @@ match output {
 
 - `INNER JOIN` / `LEFT JOIN` に対応
 - 結合条件は等値（`=`）のみ。`ON left.field = right.field` の形式で、`__name__`（document ID）も結合キーに使えます
-- 複数の JOIN を連結できます
+- 複数の JOIN を連結できます。2 つ目以降の JOIN の ON 句では、それまでに結合したテーブル（右側テーブルを含む）を左辺に参照でき、`o.__name__` のように先行テーブルの document ID も結合キーに使えます
 - 結合は **クライアント側** で実行されます。左側のクエリ結果から結合キーを集め、右側を `IN`（最大 10 件ずつ分割）で取得してハッシュ結合します
-- 出力フィールドはテーブル別名（または collection ID）で接頭辞が付きます（例: `users.name`, `orders.amount`）
+- 出力フィールドはテーブル別名（または collection ID）で接頭辞が付きます（例: `users.name`, `orders.amount`）。結合したテーブルの document ID は `{別名}.__name__` として出力されます
 
 ```sql
 SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id;
 SELECT * FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
 SELECT u.name, d.dept_name FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
+SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id
+  INNER JOIN items i ON i.order_id = o.__name__;
 ```
 
 結合キーに使えるのは string / integer / boolean / document ID のみです。NULL 値は結合対象になりません。
