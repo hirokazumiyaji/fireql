@@ -1,6 +1,7 @@
 mod support;
 
-use fireql::{FireqlError, FireqlOutput, FireqlValue};
+use fireql::{DocOutput, FireqlError, FireqlOutput, FireqlStream, FireqlValue};
+use futures::TryStreamExt;
 use serde_json::json;
 use support::{open_db, open_fireql, project_id, should_skip, unique_suffix};
 
@@ -658,6 +659,111 @@ async fn emulator_inner_join() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         _ => panic!("expected rows"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_execute_stream_streams_select_rows() -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let suffix = unique_suffix();
+    let users_col = format!("fireql_stream_users_{suffix}");
+
+    create_test_doc(&db, &users_col, "u1", &json!({"name": "Alice", "age": 30})).await?;
+    create_test_doc(&db, &users_col, "u2", &json!({"name": "Bob", "age": 40})).await?;
+
+    // A plain SELECT streams rows as documents arrive.
+    let select_sql = format!("SELECT * FROM {users_col} WHERE age >= 0 ORDER BY age");
+    match fireql.execute_stream(&select_sql).await? {
+        FireqlStream::Rows(rows) => {
+            let docs: Vec<DocOutput> = rows.try_collect().await?;
+            assert_eq!(docs.len(), 2);
+            assert_eq!(docs[0].id, "u1");
+            assert_eq!(docs[1].id, "u2");
+            assert_eq!(
+                docs[0].data.get("name"),
+                Some(&FireqlValue::String("Alice".to_string()))
+            );
+        }
+        _ => panic!("expected rows stream"),
+    }
+
+    // Aggregation results are returned as a single completed output.
+    let agg_sql = format!("SELECT COUNT(*) AS total FROM {users_col}");
+    match fireql.execute_stream(&agg_sql).await? {
+        FireqlStream::Completed(FireqlOutput::Aggregation(map)) => {
+            assert_eq!(map.get("total"), Some(&FireqlValue::Integer(2)));
+        }
+        _ => panic!("expected completed aggregation"),
+    }
+
+    // UPDATE statements are returned as a single completed output.
+    let update_sql = format!("UPDATE {users_col} SET age = 99 WHERE age >= 0");
+    match fireql.execute_stream(&update_sql).await? {
+        FireqlStream::Completed(FireqlOutput::Affected { affected }) => {
+            assert_eq!(affected, 2);
+        }
+        _ => panic!("expected completed affected"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_execute_stream_completes_joined_select() -> Result<(), Box<dyn std::error::Error>>
+{
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let suffix = unique_suffix();
+    let users_col = format!("fireql_stream_join_users_{suffix}");
+    let orders_col = format!("fireql_stream_join_orders_{suffix}");
+
+    create_test_doc(&db, &users_col, "u1", &json!({"name": "Alice"})).await?;
+    create_test_doc(
+        &db,
+        &orders_col,
+        "o1",
+        &json!({"user_id": "u1", "amount": 100}),
+    )
+    .await?;
+
+    let sql =
+        format!("SELECT * FROM {users_col} u INNER JOIN {orders_col} o ON u.__name__ = o.user_id");
+    match fireql.execute_stream(&sql).await? {
+        FireqlStream::Completed(FireqlOutput::Rows(rows)) => {
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].data.contains_key("u.name"));
+            assert!(rows[0].data.contains_key("o.amount"));
+        }
+        _ => panic!("expected completed rows"),
     }
 
     Ok(())

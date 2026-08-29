@@ -8,8 +8,8 @@ mod sql;
 mod value;
 
 pub use error::{FireqlError, Result};
-pub use format::{write_csv_rows, Format};
-pub use output::{DocOutput, FireqlOutput};
+pub use format::{write_csv_rows, write_csv_rows_stream, write_json_rows_stream, Format};
+pub use output::{DocOutput, FireqlOutput, FireqlStream};
 pub use sql::parse_collection_relative_path;
 pub use value::FireqlValue;
 
@@ -122,6 +122,17 @@ impl Fireql {
     pub async fn execute(&self, sql: &str) -> Result<FireqlOutput> {
         let stmt = sql::parse_sql(sql)?;
         executor::execute(&self.db, stmt, self.batch_parallelism).await
+    }
+
+    /// Executes `sql` and streams SELECT rows as documents arrive (#55).
+    ///
+    /// Plain SELECT statements return [`FireqlStream::Rows`], a stream of
+    /// [`DocOutput`]s that avoids buffering the whole result set in memory.
+    /// All other statement kinds (and SELECTs with JOIN or aggregation) return
+    /// [`FireqlStream::Completed`] with the same output as [`Fireql::execute`].
+    pub async fn execute_stream(&self, sql: &str) -> Result<FireqlStream<'_>> {
+        let stmt = sql::parse_sql(sql)?;
+        executor::execute_stream(&self.db, stmt, self.batch_parallelism).await
     }
 }
 
