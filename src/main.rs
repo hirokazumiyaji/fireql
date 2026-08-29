@@ -40,15 +40,7 @@ async fn main() {
 async fn run() -> Result<(), FireqlError> {
     let cli = Cli::parse();
 
-    let project_id = cli
-        .project_id
-        .or_else(|| env::var("GOOGLE_CLOUD_PROJECT").ok())
-        .or_else(|| env::var("GCLOUD_PROJECT").ok())
-        .ok_or_else(|| {
-            FireqlError::InvalidConfig(
-                "project_id is required (use --project-id or set GOOGLE_CLOUD_PROJECT)".to_string(),
-            )
-        })?;
+    let project_id = resolve_project_id(cli.project_id, |key| env::var(key).ok())?;
 
     let mut config = FireqlConfig::new(project_id);
     if let Some(database_id) = cli.database_id {
@@ -85,6 +77,25 @@ async fn run() -> Result<(), FireqlError> {
         }
     }
     Ok(())
+}
+
+/// Resolves the project id from the CLI option and the environment variable
+/// fallback chain (`FIRESTORE_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` /
+/// `GCLOUD_PROJECT`).
+fn resolve_project_id(
+    cli_project_id: Option<String>,
+    mut lookup_env: impl FnMut(&str) -> Option<String>,
+) -> Result<String, FireqlError> {
+    cli_project_id
+        .or_else(|| lookup_env("FIRESTORE_PROJECT_ID"))
+        .or_else(|| lookup_env("GOOGLE_CLOUD_PROJECT"))
+        .or_else(|| lookup_env("GCLOUD_PROJECT"))
+        .ok_or_else(|| {
+            FireqlError::InvalidConfig(
+                "project_id is required (use --project-id or set FIRESTORE_PROJECT_ID / GOOGLE_CLOUD_PROJECT)"
+                    .to_string(),
+            )
+        })
 }
 
 #[cfg(test)]
@@ -142,5 +153,66 @@ mod tests {
             "q",
         ]);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn resolve_project_id_prefers_cli_option() {
+        let resolved = resolve_project_id(Some("cli-project".to_string()), |_| {
+            Some("env-project".to_string())
+        })
+        .unwrap();
+        assert_eq!(resolved, "cli-project");
+    }
+
+    #[test]
+    fn resolve_project_id_falls_back_to_firestore_project_id_first() {
+        let mut keys = Vec::new();
+        let resolved = resolve_project_id(None, |key| {
+            keys.push(key.to_string());
+            if key == "FIRESTORE_PROJECT_ID" {
+                Some("emulator-project".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(resolved, "emulator-project");
+        assert_eq!(
+            keys.first().map(String::as_str),
+            Some("FIRESTORE_PROJECT_ID")
+        );
+    }
+
+    #[test]
+    fn resolve_project_id_falls_back_to_google_cloud_project() {
+        let resolved = resolve_project_id(None, |key| {
+            if key == "GOOGLE_CLOUD_PROJECT" {
+                Some("gcp-project".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(resolved, "gcp-project");
+    }
+
+    #[test]
+    fn resolve_project_id_falls_back_to_gcloud_project() {
+        let resolved = resolve_project_id(None, |key| {
+            if key == "GCLOUD_PROJECT" {
+                Some("gcloud-project".to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap();
+        assert_eq!(resolved, "gcloud-project");
+    }
+
+    #[test]
+    fn resolve_project_id_reports_error_when_unset() {
+        let err = resolve_project_id(None, |_| None).unwrap_err();
+        assert!(matches!(err, FireqlError::InvalidConfig(_)), "got: {err:?}");
+        assert!(err.to_string().contains("FIRESTORE_PROJECT_ID"));
     }
 }

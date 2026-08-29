@@ -28,7 +28,7 @@ cat query.sql | ./target/release/fireql --project-id my-project
 
 | オプション | 説明 |
 |---|---|
-| `--project-id` | GCP プロジェクト ID（必須。環境変数 `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` でも可） |
+| `--project-id` | GCP プロジェクト ID（必須。環境変数 `FIRESTORE_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` でも可） |
 | `--database-id` | Firestore database ID（省略時は `(default)`） |
 | `--credentials` | サービスアカウント JSON のパス |
 | `--sql` | SQL を直接渡す（省略時は stdin から読む） |
