@@ -92,7 +92,7 @@ fn resolve_project_id(
         .or_else(|| lookup_env("GCLOUD_PROJECT"))
         .ok_or_else(|| {
             FireqlError::InvalidConfig(
-                "project_id is required (use --project-id or set GOOGLE_CLOUD_PROJECT / FIRESTORE_PROJECT_ID)"
+                "project_id is required (use --project-id or set FIRESTORE_PROJECT_ID / GOOGLE_CLOUD_PROJECT)"
                     .to_string(),
             )
         })
