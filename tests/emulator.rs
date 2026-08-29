@@ -822,6 +822,105 @@ async fn emulator_left_join() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[tokio::test]
+async fn emulator_chained_join_on_prior_right_document_name(
+) -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql(&project_id).await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let suffix = unique_suffix();
+    let users_col = format!("fireql_cjoin_users_{suffix}");
+    let orders_col = format!("fireql_cjoin_orders_{suffix}");
+    let items_col = format!("fireql_cjoin_items_{suffix}");
+
+    create_test_doc(&db, &users_col, "u1", &json!({"name": "Alice"})).await?;
+    create_test_doc(&db, &users_col, "u2", &json!({"name": "Bob"})).await?;
+
+    create_test_doc(
+        &db,
+        &orders_col,
+        "o1",
+        &json!({"user_id": "u1", "amount": 100}),
+    )
+    .await?;
+    create_test_doc(
+        &db,
+        &orders_col,
+        "o2",
+        &json!({"user_id": "u2", "amount": 50}),
+    )
+    .await?;
+
+    create_test_doc(
+        &db,
+        &items_col,
+        "i1",
+        &json!({"order_id": "o1", "item_name": "Keyboard"}),
+    )
+    .await?;
+    create_test_doc(
+        &db,
+        &items_col,
+        "i2",
+        &json!({"order_id": "o1", "item_name": "Mouse"}),
+    )
+    .await?;
+    create_test_doc(
+        &db,
+        &items_col,
+        "i3",
+        &json!({"order_id": "o2", "item_name": "Monitor"}),
+    )
+    .await?;
+
+    // 2 つ目の JOIN の ON 句で先行する右側テーブル (o) の `__name__` を左辺に
+    // 記述しても、結合キーとして解決できることを検証する。
+    let sql = format!(
+        "SELECT * FROM {users_col} u \
+         INNER JOIN {orders_col} o ON u.__name__ = o.user_id \
+         INNER JOIN {items_col} i ON i.order_id = o.__name__"
+    );
+    let output = fireql.execute(&sql).await?;
+    match output {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 3);
+            let mut item_names: Vec<&str> = rows
+                .iter()
+                .map(|row| match row.data.get("i.item_name") {
+                    Some(FireqlValue::String(s)) => s.as_str(),
+                    other => panic!("expected i.item_name, got {other:?}"),
+                })
+                .collect();
+            item_names.sort_unstable();
+            assert_eq!(item_names, vec!["Keyboard", "Monitor", "Mouse"]);
+            // 先行する右側テーブルのドキュメント ID も参照できる。
+            for row in &rows {
+                match (row.data.get("o.__name__"), row.data.get("i.order_id")) {
+                    (Some(FireqlValue::String(name)), Some(FireqlValue::String(order_id))) => {
+                        assert_eq!(name, order_id)
+                    }
+                    other => panic!("expected o.__name__ / i.order_id, got {other:?}"),
+                }
+            }
+        }
+        _ => panic!("expected rows"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn emulator_or_independent_in_filters() -> Result<(), Box<dyn std::error::Error>> {
     if should_skip() {
         eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");

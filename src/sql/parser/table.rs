@@ -28,6 +28,15 @@ pub(in crate::sql) fn parse_table_with_joins_for_select(
 
     let (collection, alias) = parse_table_factor_with_alias(&table.relation)?;
     let mut join_specs = Vec::with_capacity(table.joins.len());
+    // Chained JOIN では 2 つ目以降の JOIN の ON 句が、先頭テーブルだけでなく
+    // それまでに結合した右側テーブル (別名またはコレクション名) を参照し得る。
+    // 左右の入れ替え判定に使うため、先行テーブル名の一覧を保持する。
+    let mut preceding_names: Vec<String> = Vec::with_capacity(table.joins.len() + 1);
+    preceding_names.push(
+        alias
+            .clone()
+            .unwrap_or_else(|| collection.collection_id.clone()),
+    );
 
     for join in &table.joins {
         let join_type = match &join.join_operator {
@@ -51,20 +60,25 @@ pub(in crate::sql) fn parse_table_with_joins_for_select(
         let (first_qualifier, first_field, second_qualifier, second_field) =
             parse_join_on_expr(join_type.1)?;
 
-        let left_name = alias.as_deref().unwrap_or(&collection.collection_id);
+        // JoinSpec 構築時に right_collection がムーブされるため、先行テーブル
+        // 一覧へ登録する名前は先に所有権を持たせておく。
         let right_name = right_alias
             .as_deref()
-            .unwrap_or(&right_collection.collection_id);
+            .unwrap_or(&right_collection.collection_id)
+            .to_string();
+        let is_preceding_name = |name: &str| preceding_names.iter().any(|p| p == name);
 
         let (left_alias_on, left_field, right_alias_on, right_field) =
             match (&first_qualifier, &second_qualifier) {
-                (Some(fq), Some(sq)) if fq == right_name && sq == left_name => {
+                // ON 句の左辺が右側テーブルで右辺が先行テーブルを指す場合は入れ替える。
+                // (例: `... JOIN t3 ON t3.t2_id = t2.id`)
+                (Some(fq), Some(sq)) if fq.as_str() == right_name && is_preceding_name(sq) => {
                     (second_qualifier, second_field, first_qualifier, first_field)
                 }
-                (Some(fq), None) if fq == right_name => {
+                (Some(fq), None) if fq.as_str() == right_name => {
                     (second_qualifier, second_field, first_qualifier, first_field)
                 }
-                (None, Some(sq)) if sq == left_name => {
+                (None, Some(sq)) if is_preceding_name(sq) => {
                     (second_qualifier, second_field, first_qualifier, first_field)
                 }
                 _ => (first_qualifier, first_field, second_qualifier, second_field),
@@ -78,6 +92,8 @@ pub(in crate::sql) fn parse_table_with_joins_for_select(
             left_alias: left_alias_on.or_else(|| alias.clone()),
             right_alias: right_alias_on.or(right_alias),
         });
+
+        preceding_names.push(right_name);
     }
 
     Ok((collection, alias, Some(join_specs)))
