@@ -62,6 +62,32 @@ async fn emulator_seed_provides_reusable_e2e_data() -> Result<(), Box<dyn std::e
         other => panic!("expected rows, got {other:?}"),
     }
 
+    // Mutate a subcollection document so the second seed must restore nested
+    // documents to fixture data as well (#56).
+    let mutate_sub_sql = "UPDATE collection('e2e_accounts/acme/posts') \
+                          SET likes = 999, title = 'Mutated' WHERE likes = 12";
+    match fireql.execute(mutate_sub_sql).await? {
+        FireqlOutput::Affected { affected } => assert_eq!(affected, 1),
+        other => panic!("expected affected, got {other:?}"),
+    }
+
+    let check_sub_sql =
+        "SELECT title, likes FROM collection('e2e_accounts/acme/posts') WHERE likes = 999";
+    match fireql.execute(check_sub_sql).await? {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].data.get("title"),
+                Some(&fireql::FireqlValue::String("Mutated".to_string()))
+            );
+            assert_eq!(
+                rows[0].data.get("likes"),
+                Some(&fireql::FireqlValue::Integer(999))
+            );
+        }
+        other => panic!("expected rows, got {other:?}"),
+    }
+
     // 2nd seed: should update existing mutated document back to fixture data
     run_seed(&project_id)?;
 
@@ -82,6 +108,36 @@ async fn emulator_seed_provides_reusable_e2e_data() -> Result<(), Box<dyn std::e
             assert_eq!(
                 rows[1].data.get("score"),
                 Some(&fireql::FireqlValue::Integer(90))
+            );
+        }
+        _ => panic!("expected rows"),
+    }
+
+    // The second seed must restore subcollection documents directly to their
+    // fixture values, not just the top-level collections (#56).
+    let restore_sub_sql = "SELECT * FROM collection('e2e_accounts/acme/posts')";
+    match fireql.execute(restore_sub_sql).await? {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 2);
+            let release1 = rows
+                .iter()
+                .find(|row| row.id == "release-1")
+                .expect("release-1");
+            assert_eq!(
+                release1.data.get("title"),
+                Some(&fireql::FireqlValue::String("Launch Notes".to_string()))
+            );
+            assert_eq!(
+                release1.data.get("likes"),
+                Some(&fireql::FireqlValue::Integer(12))
+            );
+            assert_eq!(
+                release1.data.get("category"),
+                Some(&fireql::FireqlValue::String("release".to_string()))
+            );
+            assert_eq!(
+                release1.data.get("published"),
+                Some(&fireql::FireqlValue::Boolean(true))
             );
         }
         _ => panic!("expected rows"),
