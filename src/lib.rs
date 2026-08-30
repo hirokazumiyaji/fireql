@@ -13,8 +13,9 @@ pub use output::{DocOutput, FireqlOutput};
 pub use sql::parse_collection_relative_path;
 pub use value::FireqlValue;
 
+use async_trait::async_trait;
 use firestore::{FirestoreDb, FirestoreDbOptions};
-use gcloud_sdk::TokenSourceType;
+use gcloud_sdk::{BoxSource, Source, Token, TokenSourceType};
 use std::path::PathBuf;
 
 pub(crate) enum CredentialSource {
@@ -35,6 +36,7 @@ pub struct FireqlConfig {
     project_id: String,
     database_id: Option<String>,
     credentials_source: Option<CredentialSource>,
+    emulator_host: Option<String>,
     batch_parallelism: usize,
 }
 
@@ -44,6 +46,7 @@ impl FireqlConfig {
             project_id: project_id.into(),
             database_id: None,
             credentials_source: None,
+            emulator_host: None,
             batch_parallelism: 1,
         }
     }
@@ -78,9 +81,42 @@ impl FireqlConfig {
         self.with_credentials_json(json.to_string())
     }
 
+    /// Targets a Firestore emulator listening on `host` (`host:port`, or a full
+    /// URL) instead of the production API.
+    ///
+    /// Callers do not need to set `FIRESTORE_EMULATOR_HOST`, so the endpoint can
+    /// change per connection without mutating the process environment. Unless
+    /// credentials are configured explicitly, a stub token is used because the
+    /// emulator does not authenticate requests.
+    pub fn with_emulator_host(mut self, host: impl Into<String>) -> Self {
+        self.emulator_host = Some(host.into());
+        self
+    }
+
     pub fn with_batch_parallelism(mut self, parallelism: usize) -> Self {
         self.batch_parallelism = parallelism.max(1);
         self
+    }
+}
+
+fn emulator_api_url(host: &str) -> String {
+    if host.starts_with("http://") || host.starts_with("https://") {
+        host.to_string()
+    } else {
+        format!("http://{host}")
+    }
+}
+
+struct EmulatorTokenSource;
+
+#[async_trait]
+impl Source for EmulatorTokenSource {
+    async fn token(&self) -> gcloud_sdk::error::Result<Token> {
+        Ok(Token::new(
+            "Bearer".to_string(),
+            "owner".into(),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        ))
     }
 }
 
@@ -97,6 +133,9 @@ impl Fireql {
         if let Some(database_id) = config.database_id {
             options = options.with_database_id(database_id);
         }
+        if let Some(host) = config.emulator_host.as_deref() {
+            options = options.with_firebase_api_url(emulator_api_url(host));
+        }
 
         let db = match config.credentials_source {
             Some(CredentialSource::FilePath(path)) => {
@@ -107,6 +146,15 @@ impl Fireql {
                     options,
                     gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
                     TokenSourceType::Json(json),
+                )
+                .await?
+            }
+            None if config.emulator_host.is_some() => {
+                let token_source: BoxSource = Box::new(EmulatorTokenSource);
+                FirestoreDb::with_options_token_source(
+                    options,
+                    gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
+                    TokenSourceType::ExternalSource(token_source),
                 )
                 .await?
             }
@@ -181,6 +229,35 @@ mod tests {
             config.credentials_source,
             Some(CredentialSource::Json(_))
         ));
+    }
+
+    #[test]
+    fn default_config_has_no_emulator_host() {
+        let config = FireqlConfig::new("my-project");
+        assert!(config.emulator_host.is_none());
+    }
+
+    #[test]
+    fn with_emulator_host_sets_host() {
+        let config = FireqlConfig::new("my-project").with_emulator_host("127.0.0.1:8080");
+        assert_eq!(config.emulator_host.as_deref(), Some("127.0.0.1:8080"));
+    }
+
+    #[test]
+    fn emulator_api_url_defaults_to_plain_http() {
+        assert_eq!(emulator_api_url("127.0.0.1:8080"), "http://127.0.0.1:8080");
+    }
+
+    #[test]
+    fn emulator_api_url_keeps_an_explicit_scheme() {
+        assert_eq!(
+            emulator_api_url("https://firestore.example:443"),
+            "https://firestore.example:443"
+        );
+        assert_eq!(
+            emulator_api_url("http://localhost:8080"),
+            "http://localhost:8080"
+        );
     }
 
     #[test]
