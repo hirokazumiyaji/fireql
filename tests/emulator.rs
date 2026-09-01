@@ -152,7 +152,10 @@ async fn emulator_with_access_token_select_insert() -> Result<(), Box<dyn std::e
     match output {
         FireqlOutput::Rows(rows) => {
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].id, doc_id);
+            match rows[0].data.get("name") {
+                Some(FireqlValue::String(name)) => assert_eq!(name, "access-token-user"),
+                other => panic!("expected copied name, got {other:?}"),
+            }
         }
         _ => panic!("expected rows"),
     }
