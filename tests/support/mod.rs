@@ -48,3 +48,15 @@ pub async fn open_fireql(project_id: &str) -> Option<Fireql> {
         }
     }
 }
+
+pub async fn open_fireql_with_access_token(project_id: &str, token: &str) -> Option<Fireql> {
+    match Fireql::new(FireqlConfig::new(project_id).with_access_token(token)).await {
+        Ok(fireql) => Some(fireql),
+        Err(err) => {
+            eprintln!(
+                "skip emulator test: failed to create Fireql with access token for project '{project_id}': {err}"
+            );
+            None
+        }
+    }
+}
