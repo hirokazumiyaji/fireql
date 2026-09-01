@@ -26,11 +26,7 @@ impl FireqlValue {
             Some(ValueType::BooleanValue(b)) => Self::Boolean(b),
             Some(ValueType::IntegerValue(i)) => Self::Integer(i),
             Some(ValueType::DoubleValue(d)) => Self::Double(d),
-            Some(ValueType::TimestampValue(ts)) => {
-                let dt = chrono::DateTime::from_timestamp(ts.seconds, ts.nanos.max(0) as u32)
-                    .unwrap_or_default();
-                Self::Timestamp(dt)
-            }
+            Some(ValueType::TimestampValue(ts)) => Self::timestamp_from_parts(ts.seconds, ts.nanos),
             Some(ValueType::StringValue(s)) => Self::String(s),
             Some(ValueType::BytesValue(b)) => Self::Bytes(b),
             Some(ValueType::ReferenceValue(r)) => Self::Reference(r),
@@ -49,6 +45,18 @@ impl FireqlValue {
             ),
             _ => Self::Null,
         }
+    }
+
+    /// Converts a Firestore / protobuf timestamp into `FireqlValue::Timestamp`.
+    ///
+    /// `google.protobuf.Timestamp` requires `nanos` in `[0, 999_999_999]`, and
+    /// Firestore does not emit negative nanos on the wire. The `max(0)` clamp is
+    /// therefore defensive only. Invalid `seconds` fall back to the Unix epoch
+    /// instead of panicking so a corrupt timestamp cannot abort an otherwise
+    /// successful query.
+    fn timestamp_from_parts(seconds: i64, nanos: i32) -> Self {
+        let dt = chrono::DateTime::from_timestamp(seconds, nanos.max(0) as u32).unwrap_or_default();
+        Self::Timestamp(dt)
     }
 
     pub(crate) fn from_document_fields(fields: HashMap<String, Value>) -> HashMap<String, Self> {
@@ -191,6 +199,24 @@ impl Serialize for TypedArray<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timestamp_clamps_negative_nanos_defensively() {
+        // Negative nanos are outside the protobuf Timestamp contract and are
+        // not expected from Firestore; clamping documents the defensive path.
+        assert_eq!(
+            FireqlValue::timestamp_from_parts(1_704_067_200, -1),
+            FireqlValue::Timestamp(chrono::DateTime::from_timestamp(1_704_067_200, 0).unwrap())
+        );
+    }
+
+    #[test]
+    fn timestamp_invalid_seconds_fallback_to_epoch() {
+        assert_eq!(
+            FireqlValue::timestamp_from_parts(i64::MAX, 0),
+            FireqlValue::Timestamp(chrono::DateTime::<chrono::Utc>::UNIX_EPOCH)
+        );
+    }
 
     #[test]
     fn test_to_relative_path_normal() {

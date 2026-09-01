@@ -1,16 +1,73 @@
-use super::doc_name::docs_to_output;
+use super::doc_name::doc_to_output;
 use crate::error::{FireqlError, Result};
 use crate::joiner::{chunk_keys, extract_join_keys, hash_join, JoinParams};
-use crate::output::FireqlOutput;
-use crate::planner::{build_aggregated_query_params, build_query_params};
+use crate::output::{DocOutput, FireqlOutput};
+use crate::planner::{plan_aggregation, plan_select, PlannedSelect, MAX_IN_VALUES};
 use crate::sql::{FilterExpr, JoinSpec, Projection, SelectProjection, SqlValue};
 use crate::value::FireqlValue;
-use firestore::{FirestoreAggregatedQuerySupport, FirestoreDb, FirestoreQuerySupport};
+use firestore::FirestoreDb;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
+use gcloud_sdk::google::firestore::v1::Document;
 use std::collections::HashSet;
 
-// Firestore allows up to 30 disjunctions in an `in` filter; keep in sync
-// with MAX_IN_VALUES in planner.rs.
-const FIRESTORE_IN_LIMIT: usize = 30;
+pub(super) async fn stream_planned_select<'b>(
+    db: &'b FirestoreDb,
+    planned: PlannedSelect,
+) -> Result<BoxStream<'b, firestore::FirestoreResult<Document>>> {
+    let mut q = db.fluent().select();
+    if let Some(fields) = planned.return_only_fields {
+        q = q.fields(fields);
+    }
+    let mut q = q.from(planned.collection_id);
+    if let Some(parent) = planned.parent {
+        q = q.parent(parent);
+    }
+    if planned.all_descendants {
+        q = q.all_descendants();
+    }
+    if let Some(filter) = planned.filter {
+        q = q.filter(move |_| Some(filter.clone()));
+    }
+    if !planned.order_by.is_empty() {
+        q = q.order_by(planned.order_by);
+    }
+    if let Some(limit) = planned.limit {
+        q = q.limit(limit);
+    }
+    Ok(q.stream_query_with_errors().await?)
+}
+
+/// Streams a plain SELECT (fields projection, no JOIN) as `DocOutput`s as
+/// documents arrive from Firestore (#55). The stream borrows only `db`, so
+/// callers may consume it while the parsed statement is dropped.
+pub(super) async fn stream_select_rows<'a>(
+    db: &'a FirestoreDb,
+    stmt: &crate::sql::SelectStatement,
+) -> Result<BoxStream<'a, Result<DocOutput>>> {
+    let projection = match &stmt.projection {
+        SelectProjection::Fields(projection) => projection,
+        SelectProjection::Aggregations(_) => {
+            return Err(FireqlError::Unsupported(
+                "aggregation results cannot be streamed as rows".to_string(),
+            ))
+        }
+    };
+    let planned = plan_select(
+        &stmt.collection,
+        stmt.filter.as_ref(),
+        &stmt.order_by,
+        stmt.limit,
+        Some(projection),
+        Some(db.get_documents_path().as_str()),
+    )?;
+
+    Ok(stream_planned_select(db, planned)
+        .await?
+        .map_err(FireqlError::from)
+        .and_then(|doc| async move { doc_to_output(doc) })
+        .boxed())
+}
 
 pub(super) async fn execute_select(
     db: &FirestoreDb,
@@ -21,21 +78,15 @@ pub(super) async fn execute_select(
     }
 
     match &stmt.projection {
-        SelectProjection::Fields(projection) => {
-            let params = build_query_params(
-                &stmt.collection,
-                stmt.filter.as_ref(),
-                &stmt.order_by,
-                stmt.limit,
-                Some(projection),
-                Some(db.get_documents_path().as_str()),
-            )?;
-
-            let docs = db.query_doc(params).await?;
-            Ok(FireqlOutput::Rows(docs_to_output(docs)?))
+        SelectProjection::Fields(_) => {
+            // Stream document bodies so callers that later write row-by-row
+            // (JSON) do not force an intermediate all-at-once Firestore fetch
+            // API; CSV/Table still buffer via FireqlOutput::Rows today (#28).
+            let rows: Vec<DocOutput> = stream_select_rows(db, &stmt).await?.try_collect().await?;
+            Ok(FireqlOutput::Rows(rows))
         }
         SelectProjection::Aggregations(aggregations) => {
-            let params = build_aggregated_query_params(
+            let planned = plan_aggregation(
                 &stmt.collection,
                 stmt.filter.as_ref(),
                 &stmt.order_by,
@@ -43,7 +94,32 @@ pub(super) async fn execute_select(
                 aggregations,
                 Some(db.get_documents_path().as_str()),
             )?;
-            let docs = db.aggregated_query_doc(params).await?;
+            let mut q = db.fluent().select().from(planned.select.collection_id);
+            if let Some(parent) = planned.select.parent {
+                q = q.parent(parent);
+            }
+            if planned.select.all_descendants {
+                q = q.all_descendants();
+            }
+            if let Some(filter) = planned.select.filter {
+                q = q.filter(move |_| Some(filter.clone()));
+            }
+            let docs = q
+                .aggregate(|agg| {
+                    agg.fields(planned.aggregations.iter().map(|a| match a.func {
+                        crate::sql::AggregationFunc::Count => agg.field(&a.alias).count(),
+                        crate::sql::AggregationFunc::Sum => {
+                            let field = a.field.as_deref().unwrap_or_default();
+                            agg.field(&a.alias).sum(field)
+                        }
+                        crate::sql::AggregationFunc::Avg => {
+                            let field = a.field.as_deref().unwrap_or_default();
+                            agg.field(&a.alias).avg(field)
+                        }
+                    }))
+                })
+                .query()
+                .await?;
             let data = docs
                 .into_iter()
                 .next()
@@ -54,28 +130,21 @@ pub(super) async fn execute_select(
     }
 }
 
-fn strip_alias_from_filter(filter: &FilterExpr, alias: &str) -> FilterExpr {
-    let strip_field = |field: &str| -> String {
-        let prefix = format!("{alias}.");
-        if field.starts_with(&prefix) {
-            field[prefix.len()..].to_string()
-        } else {
-            field.to_string()
-        }
-    };
-
+/// Rewrites every field reference in `filter` via `f`, recursing into
+/// AND/OR composites. Shared by alias stripping and future field rewrites.
+fn map_filter_fields(filter: &FilterExpr, f: &mut impl FnMut(&str) -> String) -> FilterExpr {
     match filter {
         FilterExpr::Compare { field, op, value } => FilterExpr::Compare {
-            field: strip_field(field),
+            field: f(field),
             op: *op,
             value: value.clone(),
         },
         FilterExpr::ArrayContains { field, value } => FilterExpr::ArrayContains {
-            field: strip_field(field),
+            field: f(field),
             value: value.clone(),
         },
         FilterExpr::ArrayContainsAny { field, values } => FilterExpr::ArrayContainsAny {
-            field: strip_field(field),
+            field: f(field),
             values: values.clone(),
         },
         FilterExpr::InList {
@@ -83,42 +152,58 @@ fn strip_alias_from_filter(filter: &FilterExpr, alias: &str) -> FilterExpr {
             values,
             negated,
         } => FilterExpr::InList {
-            field: strip_field(field),
+            field: f(field),
             values: values.clone(),
             negated: *negated,
         },
         FilterExpr::Unary { field, op } => FilterExpr::Unary {
-            field: strip_field(field),
+            field: f(field),
             op: *op,
         },
-        FilterExpr::And(exprs) => FilterExpr::And(
-            exprs
-                .iter()
-                .map(|e| strip_alias_from_filter(e, alias))
-                .collect(),
-        ),
-        FilterExpr::Or(exprs) => FilterExpr::Or(
-            exprs
-                .iter()
-                .map(|e| strip_alias_from_filter(e, alias))
-                .collect(),
-        ),
+        FilterExpr::And(exprs) => {
+            FilterExpr::And(exprs.iter().map(|e| map_filter_fields(e, f)).collect())
+        }
+        FilterExpr::Or(exprs) => {
+            FilterExpr::Or(exprs.iter().map(|e| map_filter_fields(e, f)).collect())
+        }
     }
+}
+
+fn strip_alias_from_filter(filter: &FilterExpr, alias: &str) -> FilterExpr {
+    let prefix = format!("{alias}.");
+    map_filter_fields(filter, &mut |field| {
+        field
+            .strip_prefix(prefix.as_str())
+            .unwrap_or(field)
+            .to_string()
+    })
 }
 
 /// Resolves the left-side join key for a join step against `current_result`.
 ///
-/// `__name__` always resolves to the leading table's `DocOutput.id`, which is
-/// preserved across every join, so it must stay unqualified even on chained
-/// joins. Regular fields, by contrast, are prefixed with their alias on chained
+/// `__name__` resolves to the leading table's `DocOutput.id`, which is
+/// preserved across every join, so it stays unqualified when the ON clause
+/// references the leading alias even on chained joins. When it references a
+/// previously joined right table (e.g. `o.__name__`), `hash_join` preserves
+/// that table's document id under `{alias}.__name__`, so the key resolves to
+/// the prefixed data field. A qualifier that refers to neither the leading
+/// table nor a joined table is rejected, since no row data can supply it.
+/// Regular fields, by contrast, are prefixed with their alias on chained
 /// joins because the left rows are already prefixed (e.g. `u.dept_id`).
-/// A previous right table's `__name__` cannot be used: that id is never retained.
-fn effective_left_join_field(join: &JoinSpec, is_joined: bool, left_alias: &str) -> Result<String> {
+fn effective_left_join_field(
+    join: &JoinSpec,
+    is_joined: bool,
+    left_alias: &str,
+    joined_names: &[String],
+) -> Result<String> {
     if join.left_field == "__name__" {
         let qualifier = join.left_alias.as_deref().unwrap_or(left_alias);
         if is_joined && qualifier != left_alias {
+            if joined_names.iter().any(|name| name == qualifier) {
+                return Ok(format!("{qualifier}.__name__"));
+            }
             return Err(FireqlError::Unsupported(format!(
-                "JOIN on `{qualifier}.__name__` is not supported; only the leading table's document id can be used as a join key"
+                "JOIN on `{qualifier}.__name__` is not supported; `{qualifier}` refers to neither the leading table nor a previously joined table"
             )));
         }
         Ok("__name__".to_string())
@@ -143,7 +228,7 @@ async fn execute_join_select(
         .filter
         .as_ref()
         .map(|f| strip_alias_from_filter(f, left_alias));
-    let left_params = build_query_params(
+    let left_planned = plan_select(
         &stmt.collection,
         stripped_filter.as_ref(),
         &stmt.order_by,
@@ -151,77 +236,30 @@ async fn execute_join_select(
         None,
         Some(db.get_documents_path().as_str()),
     )?;
-    let left_docs_raw = db.query_doc(left_params).await?;
-    let left_docs = docs_to_output(left_docs_raw)?;
+    let left_docs: Vec<DocOutput> = stream_planned_select(db, left_planned)
+        .await?
+        .map_err(FireqlError::from)
+        .and_then(|doc| async move { doc_to_output(doc) })
+        .try_collect()
+        .await?;
 
     let mut current_result = left_docs;
     let mut is_joined = false;
+    // これまでに結合した右側テーブルの別名 (別名がなければコレクション名)。
+    // 後続の JOIN の ON 句が先行する右側テーブルの `__name__` を参照できるかの
+    // 判定に使う。
+    let mut joined_names: Vec<String> = Vec::with_capacity(joins.len());
 
     for join in joins {
-        let effective_left_field = effective_left_join_field(join, is_joined, left_alias)?;
+        let effective_left_field =
+            effective_left_join_field(join, is_joined, left_alias, &joined_names)?;
 
         let keys = extract_join_keys(&current_result, &effective_left_field)?;
         if keys.is_empty() && join.join_type == crate::sql::JoinType::Inner {
             return Ok(FireqlOutput::Rows(vec![]));
         }
 
-        let chunks = chunk_keys(&keys, FIRESTORE_IN_LIMIT);
-        let mut right_docs = Vec::new();
-
-        let doc_path = match &join.collection.parent_path {
-            Some(pp) => format!(
-                "{}/{}/{}",
-                db.get_documents_path(),
-                pp,
-                join.collection.collection_id
-            ),
-            None => format!(
-                "{}/{}",
-                db.get_documents_path(),
-                join.collection.collection_id
-            ),
-        };
-
-        for chunk in chunks {
-            // The full document path is deliberately sent as a plain string
-            // (`SqlValue::Literal`), not `SqlValue::Reference`: the string form
-            // is what the emulator e2e join tests validate against `__name__`;
-            // a ReferenceValue here would change the wire type untested.
-            let in_values: Vec<SqlValue> = if join.right_field == "__name__" {
-                chunk
-                    .iter()
-                    .map(|k| match k {
-                        crate::joiner::JoinKey::String(s) => {
-                            SqlValue::Literal(serde_json::Value::String(format!("{doc_path}/{s}")))
-                        }
-                        _ => SqlValue::Literal(k.to_json_value()),
-                    })
-                    .collect()
-            } else {
-                chunk
-                    .iter()
-                    .map(|k| SqlValue::Literal(k.to_json_value()))
-                    .collect()
-            };
-
-            let in_filter = FilterExpr::InList {
-                field: join.right_field.clone(),
-                values: in_values,
-                negated: false,
-            };
-
-            let right_params = build_query_params(
-                &join.collection,
-                Some(&in_filter),
-                &[],
-                None,
-                None,
-                Some(db.get_documents_path().as_str()),
-            )?;
-
-            let chunk_docs = db.query_doc(right_params).await?;
-            right_docs.extend(docs_to_output(chunk_docs)?);
-        }
+        let right_docs = fetch_right_docs(db, join, &keys).await?;
 
         let right_prefix = join
             .right_alias
@@ -242,35 +280,118 @@ async fn execute_join_select(
         )?;
 
         is_joined = true;
+        joined_names.push(right_prefix.to_string());
     }
 
-    if let SelectProjection::Fields(Projection::Fields(ref fields)) = stmt.projection {
-        let available_keys: HashSet<String> = current_result
-            .iter()
-            .flat_map(|doc| doc.data.keys().cloned())
-            .collect();
+    retain_projected_fields(&mut current_result, &stmt.projection);
 
-        let mut retained_keys: HashSet<String> = HashSet::new();
-        for field in fields {
-            if available_keys.contains(field) {
-                retained_keys.insert(field.clone());
-            }
-            if !field.contains('.') {
-                let suffix = format!(".{field}");
-                for key in &available_keys {
-                    if key.ends_with(&suffix) {
-                        retained_keys.insert(key.clone());
+    Ok(FireqlOutput::Rows(current_result))
+}
+
+/// Fetches the right-side documents matching any of `keys` for one join step,
+/// querying Firestore in `MAX_IN_VALUES`-sized IN chunks.
+async fn fetch_right_docs(
+    db: &FirestoreDb,
+    join: &JoinSpec,
+    keys: &[crate::joiner::JoinKey],
+) -> Result<Vec<DocOutput>> {
+    let chunks = chunk_keys(keys, MAX_IN_VALUES);
+    let mut right_docs = Vec::new();
+
+    let doc_path = match &join.collection.parent_path {
+        Some(pp) => format!(
+            "{}/{}/{}",
+            db.get_documents_path(),
+            pp,
+            join.collection.collection_id
+        ),
+        None => format!(
+            "{}/{}",
+            db.get_documents_path(),
+            join.collection.collection_id
+        ),
+    };
+
+    for chunk in chunks {
+        // `__name__` / document-key filters require a ReferenceValue on the
+        // wire; a plain string literal is rejected by Firestore as
+        // "__key__ filter value must be a Key".
+        let in_values: Vec<SqlValue> = if join.right_field == "__name__" {
+            chunk
+                .iter()
+                .map(|k| match k {
+                    crate::joiner::JoinKey::String(s) => {
+                        SqlValue::Reference(format!("{doc_path}/{s}"))
                     }
+                    _ => SqlValue::Literal(k.to_json_value()),
+                })
+                .collect()
+        } else {
+            chunk
+                .iter()
+                .map(|k| SqlValue::Literal(k.to_json_value()))
+                .collect()
+        };
+
+        let in_filter = FilterExpr::InList {
+            field: join.right_field.clone(),
+            values: in_values,
+            negated: false,
+        };
+
+        let right_planned = plan_select(
+            &join.collection,
+            Some(&in_filter),
+            &[],
+            None,
+            None,
+            Some(db.get_documents_path().as_str()),
+        )?;
+
+        let chunk_docs: Vec<DocOutput> = stream_planned_select(db, right_planned)
+            .await?
+            .map_err(FireqlError::from)
+            .and_then(|doc| async move { doc_to_output(doc) })
+            .try_collect()
+            .await?;
+        right_docs.extend(chunk_docs);
+    }
+
+    Ok(right_docs)
+}
+
+/// Narrows joined rows to the explicitly projected fields. A requested field
+/// matches either an exact (possibly alias-prefixed) key or the suffix of a
+/// prefixed key, so `SELECT name` keeps both `name` and `u.name`. A no-op for
+/// wildcard projections.
+fn retain_projected_fields(rows: &mut [DocOutput], projection: &SelectProjection) {
+    let SelectProjection::Fields(Projection::Fields(fields)) = projection else {
+        return;
+    };
+
+    let available_keys: HashSet<String> = rows
+        .iter()
+        .flat_map(|doc| doc.data.keys().cloned())
+        .collect();
+
+    let mut retained_keys: HashSet<String> = HashSet::new();
+    for field in fields {
+        if available_keys.contains(field) {
+            retained_keys.insert(field.clone());
+        }
+        if !field.contains('.') {
+            let suffix = format!(".{field}");
+            for key in &available_keys {
+                if key.ends_with(&suffix) {
+                    retained_keys.insert(key.clone());
                 }
             }
         }
-
-        for doc in &mut current_result {
-            doc.data.retain(|k, _| retained_keys.contains(k));
-        }
     }
 
-    Ok(FireqlOutput::Rows(current_result))
+    for doc in rows {
+        doc.data.retain(|k, _| retained_keys.contains(k));
+    }
 }
 
 #[cfg(test)]
@@ -297,12 +418,12 @@ mod tests {
     fn effective_left_field_first_join_uses_field_as_is() {
         let name_join = join_spec("__name__", "user_id", Some("u"));
         assert_eq!(
-            effective_left_join_field(&name_join, false, "u").unwrap(),
+            effective_left_join_field(&name_join, false, "u", &[]).unwrap(),
             "__name__"
         );
         let field_join = join_spec("dept_id", "__name__", Some("u"));
         assert_eq!(
-            effective_left_join_field(&field_join, false, "u").unwrap(),
+            effective_left_join_field(&field_join, false, "u", &[]).unwrap(),
             "dept_id"
         );
     }
@@ -311,7 +432,7 @@ mod tests {
     fn effective_left_field_chained_name_resolves_to_leading_id() {
         let join = join_spec("__name__", "user_id", Some("u"));
         assert_eq!(
-            effective_left_join_field(&join, true, "u").unwrap(),
+            effective_left_join_field(&join, true, "u", &[]).unwrap(),
             "__name__"
         );
     }
@@ -320,15 +441,67 @@ mod tests {
     fn effective_left_field_chained_regular_field_is_prefixed() {
         let join = join_spec("dept_id", "__name__", Some("u"));
         assert_eq!(
-            effective_left_join_field(&join, true, "u").unwrap(),
+            effective_left_join_field(&join, true, "u", &[]).unwrap(),
             "u.dept_id"
         );
     }
 
     #[test]
-    fn effective_left_field_chained_prior_right_name_is_rejected() {
+    fn effective_left_field_chained_prior_right_name_resolves_to_prefixed_key() {
         let join = join_spec("__name__", "order_id", Some("o"));
-        let err = effective_left_join_field(&join, true, "u").unwrap_err();
+        let joined = vec!["o".to_string()];
+        assert_eq!(
+            effective_left_join_field(&join, true, "u", &joined).unwrap(),
+            "o.__name__"
+        );
+    }
+
+    #[test]
+    fn effective_left_field_chained_unknown_name_qualifier_is_rejected() {
+        let join = join_spec("__name__", "order_id", Some("x"));
+        let joined = vec!["o".to_string()];
+        let err = effective_left_join_field(&join, true, "u", &joined).unwrap_err();
         assert!(matches!(err, FireqlError::Unsupported(_)));
+    }
+
+    fn row(fields: &[(&str, FireqlValue)]) -> DocOutput {
+        DocOutput {
+            id: "d1".to_string(),
+            path: "c/d1".to_string(),
+            data: fields
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn retain_projected_fields_keeps_exact_and_alias_prefixed_matches() {
+        let mut rows = vec![row(&[
+            ("name", FireqlValue::String("Alice".into())),
+            ("u.name", FireqlValue::String("Bob".into())),
+            ("o.total", FireqlValue::Integer(1)),
+        ])];
+
+        retain_projected_fields(
+            &mut rows,
+            &SelectProjection::Fields(Projection::Fields(vec!["name".to_string()])),
+        );
+
+        let mut keys: Vec<_> = rows[0].data.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, vec!["name", "u.name"]);
+    }
+
+    #[test]
+    fn retain_projected_fields_is_noop_for_wildcard() {
+        let mut rows = vec![row(&[
+            ("a", FireqlValue::Integer(1)),
+            ("b", FireqlValue::Integer(2)),
+        ])];
+
+        retain_projected_fields(&mut rows, &SelectProjection::Fields(Projection::All));
+
+        assert_eq!(rows[0].data.len(), 2);
     }
 }

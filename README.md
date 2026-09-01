@@ -127,19 +127,43 @@ CLI では `--format json|csv|table` で出力形式を選択できます。
 
 ## Emulator テスト
 
-`FIRESTORE_EMULATOR_HOST` を設定したときのみ統合テストが実行されます。
+`tests/emulator.rs` / `tests/e2e_seed.rs` は Firestore Emulator が必要です。
+`FIRESTORE_EMULATOR_HOST` が未設定のときは各テストが内部でスキップされます。
+
+CI（`.github/workflows/ci.yml`）では Emulator を起動したうえで `cargo test --all` を実行しています。
+
+### ローカルでの起動手順
+
+1. ツールチェーンを入れる（任意だが推奨）:
+
+```bash
+mise install   # Rust + Java (Temurin 21)。Emulator 起動に Java が必要
+```
+
+2. Firestore Emulator を起動する:
+
+```bash
+# gcloud CLI と cloud-firestore-emulator コンポーネントが必要
+gcloud components install cloud-firestore-emulator beta
+gcloud beta emulators firestore start --host-port=localhost:8080
+```
+
+3. 別ターミナルで環境変数を設定してテストする（CI と同じ値）:
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
-export FIRESTORE_PROJECT_ID=demo-fireql
-cargo test
+export FIRESTORE_PROJECT_ID=fireql-emulator
+export GOOGLE_CLOUD_PROJECT=fireql-emulator
+cargo test --test emulator --test e2e_seed
+# または全テスト:
+cargo test --all
 ```
 
 固定の e2e データを emulator に投入したい場合は `fireql-emulator-seed` を使います。投入定義は `fixtures/emulator-e2e.json` にあります。
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
-export FIRESTORE_PROJECT_ID=demo-fireql
+export FIRESTORE_PROJECT_ID=fireql-emulator
 cargo run --bin fireql-emulator-seed
 ```
 

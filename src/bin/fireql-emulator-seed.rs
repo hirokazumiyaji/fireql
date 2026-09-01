@@ -1,9 +1,6 @@
 use async_trait::async_trait;
 use clap::Parser;
-use firestore::{
-    FirestoreCreateSupport, FirestoreDb, FirestoreDbOptions, FirestoreGetByIdSupport,
-    FirestoreUpdateSupport,
-};
+use firestore::{FirestoreDb, FirestoreDbOptions};
 use gcloud_sdk::{BoxSource, Source, Token, TokenSourceType};
 use serde::Deserialize;
 use serde_json::Value;
@@ -58,7 +55,7 @@ impl Source for EmulatorTokenSource {
         Ok(Token::new(
             "Bearer".to_string(),
             "owner".into(),
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            firestore::jiff::Timestamp::MAX,
         ))
     }
 }
@@ -149,60 +146,71 @@ async fn upsert_document(
     target: &CollectionTarget,
     document: &DocumentSeed,
 ) -> Result<(), Box<dyn Error>> {
-    match &target.parent {
-        Some(parent) => {
-            if db
-                .get_obj_at_if_exists::<Value, _>(parent, &target.collection_id, &document.id, None)
-                .await?
-                .is_some()
-            {
+    let exists = match &target.parent {
+        Some(parent) => db
+            .fluent()
+            .select()
+            .by_id_in(&target.collection_id)
+            .parent(parent)
+            .obj::<Value>()
+            .one(&document.id)
+            .await?
+            .is_some(),
+        None => db
+            .fluent()
+            .select()
+            .by_id_in(&target.collection_id)
+            .obj::<Value>()
+            .one(&document.id)
+            .await?
+            .is_some(),
+    };
+
+    if exists {
+        match &target.parent {
+            Some(parent) => {
                 let _: Value = db
-                    .update_obj_at(
-                        parent,
-                        &target.collection_id,
-                        &document.id,
-                        &document.data,
-                        None,
-                        None,
-                        None,
-                    )
+                    .fluent()
+                    .update()
+                    .in_col(&target.collection_id)
+                    .document_id(&document.id)
+                    .parent(parent)
+                    .object(&document.data)
+                    .execute()
                     .await?;
-            } else {
+            }
+            None => {
                 let _: Value = db
-                    .create_obj_at(
-                        parent,
-                        &target.collection_id,
-                        Some(&document.id),
-                        &document.data,
-                        None,
-                    )
+                    .fluent()
+                    .update()
+                    .in_col(&target.collection_id)
+                    .document_id(&document.id)
+                    .object(&document.data)
+                    .execute()
                     .await?;
             }
         }
-        None => {
-            if db
-                .get_obj_if_exists::<Value, _>(&target.collection_id, &document.id, None)
-                .await?
-                .is_some()
-            {
+    } else {
+        match &target.parent {
+            Some(parent) => {
                 let _: Value = db
-                    .update_obj(
-                        &target.collection_id,
-                        &document.id,
-                        &document.data,
-                        None,
-                        None,
-                        None,
-                    )
+                    .fluent()
+                    .insert()
+                    .into(&target.collection_id)
+                    .document_id(&document.id)
+                    .parent(parent)
+                    .object(&document.data)
+                    .execute()
                     .await?;
-            } else {
+            }
+            None => {
                 let _: Value = db
-                    .create_obj(
-                        &target.collection_id,
-                        Some(&document.id),
-                        &document.data,
-                        None,
-                    )
+                    .fluent()
+                    .insert()
+                    .into(&target.collection_id)
+                    .document_id(&document.id)
+                    .object(&document.data)
+                    .execute()
                     .await?;
             }
         }

@@ -1,20 +1,33 @@
+//! SQL 文の解析エントリポイント。ステートメントレベルの構造（SELECT / UPDATE /
+//! DELETE / INSERT SELECT）と射影・ORDER BY・LIMIT を扱い、フィルタ/値式は
+//! `filter` モジュール、FROM/JOIN は `table` モジュールに委譲する。
+
+mod filter;
+mod table;
+
 use super::{
-    AggregationExpr, AggregationFunc, CollectionSpec, CompareOp, DeleteStatement, FilterExpr,
-    InsertSelectStatement, JoinSpec, JoinType, OrderBy, OrderDirection, Projection,
-    SelectProjection, SelectStatement, SqlValue, StatementAst, UnaryOp, UpdateStatement,
+    AggregationExpr, AggregationFunc, CollectionSpec, DeleteStatement, FilterExpr,
+    InsertSelectStatement, OrderBy, OrderDirection, Projection, SelectProjection, SelectStatement,
+    SqlValue, StatementAst, UpdateStatement,
 };
 use crate::error::{FireqlError, Result};
-use chrono::{DateTime, Utc};
-use serde_json::Value as JsonValue;
 use sqlparser::ast::{
-    AssignmentTarget, Expr, FromTable, FunctionArg, FunctionArgExpr, FunctionArguments,
-    JoinConstraint, JoinOperator, ObjectName, ObjectNamePart, OrderByExpr, OrderByKind, Query,
-    Select, SelectItem, SetExpr, Statement, TableFactor, TableObject, TableWithJoins, Value,
+    AssignmentTarget, Expr, FromTable, FunctionArgExpr, FunctionArguments, OrderByExpr,
+    OrderByKind, Query, Select, SelectItem, SetExpr, Statement, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
+use table::object_name_to_string;
 
-fn reject_function_modifiers(function: &sqlparser::ast::Function, context: &str) -> Result<()> {
+pub(super) use filter::{parse_field_expr, parse_value_expr};
+pub(super) use table::{
+    parse_insert_target, parse_table_with_joins, parse_table_with_joins_for_select,
+};
+
+pub(super) fn reject_function_modifiers(
+    function: &sqlparser::ast::Function,
+    context: &str,
+) -> Result<()> {
     let has_distinct = matches!(
         &function.args,
         FunctionArguments::List(list) if list.duplicate_treatment.is_some()
@@ -37,6 +50,32 @@ fn reject_unsupported_clauses(clauses: &[(bool, &str)]) -> Result<()> {
         )));
     }
     Ok(())
+}
+
+pub(super) fn expr_to_string_literal(expr: &Expr, context: &str) -> Result<String> {
+    match expr {
+        Expr::Value(vws) => match &vws.value {
+            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(s.clone()),
+            _ => Err(FireqlError::Unsupported(format!(
+                "{context} expects a string literal"
+            ))),
+        },
+        _ => Err(FireqlError::Unsupported(format!(
+            "{context} expects a string literal"
+        ))),
+    }
+}
+
+pub(super) fn extract_function_arg_list(
+    args: &FunctionArguments,
+) -> Result<&[sqlparser::ast::FunctionArg]> {
+    match args {
+        FunctionArguments::List(list) => Ok(&list.args),
+        FunctionArguments::None => Ok(&[]),
+        _ => Err(FireqlError::Unsupported(
+            "Subquery function arguments are not supported".to_string(),
+        )),
+    }
 }
 
 pub fn parse_sql(input: &str) -> Result<StatementAst> {
@@ -68,7 +107,7 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
             let collection = parse_table_with_joins(&update.table)?;
             let filter = update
                 .selection
-                .map(|expr| parse_filter_expr(&expr))
+                .map(|expr| filter::parse_filter_expr(&expr))
                 .transpose()?
                 .ok_or(FireqlError::MissingWhere)?;
             let assignments = parse_assignments(update.assignments)?;
@@ -101,7 +140,7 @@ pub fn parse_sql(input: &str) -> Result<StatementAst> {
             let collection = parse_table_with_joins(&from[0])?;
             let filter = delete
                 .selection
-                .map(|expr| parse_filter_expr(&expr))
+                .map(|expr| filter::parse_filter_expr(&expr))
                 .transpose()?
                 .ok_or(FireqlError::MissingWhere)?;
             let (order_by, limit) =
@@ -198,25 +237,6 @@ pub(super) fn parse_insert_select(
         columns,
         source,
     }))
-}
-
-fn parse_insert_target(target: &TableObject) -> Result<CollectionSpec> {
-    match target {
-        TableObject::TableName(name) => parse_object_name(name),
-        TableObject::TableFunction(function) => {
-            let name = object_name_to_string(&function.name);
-            if !name.eq_ignore_ascii_case("collection") {
-                return Err(FireqlError::Unsupported(format!(
-                    "Unsupported INSERT target function: {name}"
-                )));
-            }
-            let args = extract_function_arg_list(&function.args)?;
-            parse_collection_args(args)
-        }
-        TableObject::TableQuery(_) => Err(FireqlError::Unsupported(
-            "INSERT target sub-query is not supported".to_string(),
-        )),
-    }
 }
 
 fn validate_insert_select_projection(
@@ -362,7 +382,7 @@ fn parse_select(
 
     let filter = select
         .selection
-        .map(|expr| parse_filter_expr(&expr))
+        .map(|expr| filter::parse_filter_expr(&expr))
         .transpose()?;
     let (order_by, limit) =
         parse_order_and_limit_from_query_parts(Some(order_by_exprs), limit_expr)?;
@@ -429,210 +449,6 @@ fn validate_join_filter_aliases(filter: &FilterExpr, right_names: &[&str]) -> Re
             Ok(())
         }
     }
-}
-
-fn parse_table_with_joins(table: &TableWithJoins) -> Result<CollectionSpec> {
-    if !table.joins.is_empty() {
-        return Err(FireqlError::Unsupported(
-            "JOIN is not supported".to_string(),
-        ));
-    }
-    parse_table_factor(&table.relation)
-}
-
-fn parse_table_with_joins_for_select(
-    table: &TableWithJoins,
-) -> Result<(CollectionSpec, Option<String>, Option<Vec<JoinSpec>>)> {
-    if table.joins.is_empty() {
-        let (collection, alias) = parse_table_factor_with_alias(&table.relation)?;
-        return Ok((collection, alias, None));
-    }
-
-    let (collection, alias) = parse_table_factor_with_alias(&table.relation)?;
-    let mut join_specs = Vec::with_capacity(table.joins.len());
-
-    for join in &table.joins {
-        let join_type = match &join.join_operator {
-            JoinOperator::Inner(JoinConstraint::On(on_expr)) => (JoinType::Inner, on_expr),
-            JoinOperator::LeftOuter(JoinConstraint::On(on_expr)) => (JoinType::Left, on_expr),
-            JoinOperator::Left(JoinConstraint::On(on_expr)) => (JoinType::Left, on_expr),
-            _ => {
-                return Err(FireqlError::Unsupported(
-                    "Only INNER JOIN and LEFT JOIN are supported".to_string(),
-                ))
-            }
-        };
-
-        let (right_collection, right_alias) = parse_table_factor_with_alias(&join.relation)?;
-        let (first_qualifier, first_field, second_qualifier, second_field) =
-            parse_join_on_expr(join_type.1)?;
-
-        let left_name = alias.as_deref().unwrap_or(&collection.collection_id);
-        let right_name = right_alias
-            .as_deref()
-            .unwrap_or(&right_collection.collection_id);
-
-        let (left_alias_on, left_field, right_alias_on, right_field) =
-            match (&first_qualifier, &second_qualifier) {
-                (Some(fq), Some(sq)) if fq == right_name && sq == left_name => {
-                    (second_qualifier, second_field, first_qualifier, first_field)
-                }
-                (Some(fq), None) if fq == right_name => {
-                    (second_qualifier, second_field, first_qualifier, first_field)
-                }
-                (None, Some(sq)) if sq == left_name => {
-                    (second_qualifier, second_field, first_qualifier, first_field)
-                }
-                _ => (first_qualifier, first_field, second_qualifier, second_field),
-            };
-
-        join_specs.push(JoinSpec {
-            join_type: join_type.0,
-            collection: right_collection,
-            left_field,
-            right_field,
-            left_alias: left_alias_on.or_else(|| alias.clone()),
-            right_alias: right_alias_on.or(right_alias),
-        });
-    }
-
-    Ok((collection, alias, Some(join_specs)))
-}
-
-fn parse_table_factor_with_alias(factor: &TableFactor) -> Result<(CollectionSpec, Option<String>)> {
-    match factor {
-        TableFactor::Table {
-            name,
-            alias,
-            args,
-            sample,
-            ..
-        } => {
-            if sample.is_some() {
-                return Err(FireqlError::Unsupported(
-                    "TABLESAMPLE is not supported".to_string(),
-                ));
-            }
-            if let Some(tfa) = args {
-                let func_name = object_name_to_string(name);
-                if func_name.eq_ignore_ascii_case("collection_group") {
-                    let spec = parse_collection_group_args(&tfa.args)?;
-                    let alias_str = alias.as_ref().map(|a| a.name.value.clone());
-                    return Ok((spec, alias_str));
-                }
-                if func_name.eq_ignore_ascii_case("collection") {
-                    let spec = parse_collection_args(&tfa.args)?;
-                    let alias_str = alias.as_ref().map(|a| a.name.value.clone());
-                    return Ok((spec, alias_str));
-                }
-                return Err(FireqlError::Unsupported(format!(
-                    "Table-valued functions are not supported: {func_name}"
-                )));
-            }
-
-            let collection = parse_object_name(name)?;
-            let alias_str = alias.as_ref().map(|a| a.name.value.clone());
-            Ok((collection, alias_str))
-        }
-        other => Err(FireqlError::Unsupported(format!(
-            "Unsupported FROM source: {other}"
-        ))),
-    }
-}
-
-fn parse_join_on_expr(expr: &Expr) -> Result<(Option<String>, String, Option<String>, String)> {
-    match expr {
-        Expr::BinaryOp { left, op, right } => {
-            if !matches!(op, sqlparser::ast::BinaryOperator::Eq) {
-                return Err(FireqlError::Unsupported(
-                    "Only equality conditions are supported in JOIN ON clause".to_string(),
-                ));
-            }
-            let (left_table, left_field) = parse_compound_ident_expr(left)?;
-            let (right_table, right_field) = parse_compound_ident_expr(right)?;
-            Ok((left_table, left_field, right_table, right_field))
-        }
-        _ => Err(FireqlError::Unsupported(
-            "Only equality conditions are supported in JOIN ON clause".to_string(),
-        )),
-    }
-}
-
-fn parse_compound_ident_expr(expr: &Expr) -> Result<(Option<String>, String)> {
-    match expr {
-        Expr::CompoundIdentifier(idents) if idents.len() == 2 => {
-            Ok((Some(idents[0].value.clone()), idents[1].value.clone()))
-        }
-        Expr::Identifier(ident) => Ok((None, ident.value.clone())),
-        _ => Err(FireqlError::Unsupported(
-            "JOIN ON clause requires field references in the form table.field or field".to_string(),
-        )),
-    }
-}
-
-fn parse_table_factor(factor: &TableFactor) -> Result<CollectionSpec> {
-    parse_table_factor_with_alias(factor).map(|(spec, _)| spec)
-}
-
-/// Extracts the single string argument of `collection()` / `collection_group()`,
-/// accepting either a string literal (`'posts'`) or a bare identifier (`posts`).
-fn collection_function_arg(args: &[FunctionArg], context: &str) -> Result<String> {
-    if args.len() != 1 {
-        return Err(FireqlError::Unsupported(format!(
-            "{context} expects exactly one argument"
-        )));
-    }
-    match &args[0] {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => match expr {
-            Expr::Value(_) => expr_to_string_literal(expr, context),
-            Expr::Identifier(ident) => Ok(ident.value.clone()),
-            other => Err(FireqlError::Unsupported(format!(
-                "{context} expects a string literal or identifier, got: {other}"
-            ))),
-        },
-        _ => Err(FireqlError::Unsupported(format!(
-            "{context} expects a single unnamed argument"
-        ))),
-    }
-}
-
-fn parse_collection_group_args(args: &[FunctionArg]) -> Result<CollectionSpec> {
-    let collection_id = collection_function_arg(args, "collection_group()")?;
-    Ok(CollectionSpec {
-        collection_id,
-        parent_path: None,
-        is_group: true,
-    })
-}
-fn parse_collection_args(args: &[FunctionArg]) -> Result<CollectionSpec> {
-    let raw = collection_function_arg(args, "collection()")?;
-    let (collection_id, parent_path) = super::parse_collection_relative_path(&raw)?;
-    Ok(CollectionSpec {
-        collection_id,
-        parent_path,
-        is_group: false,
-    })
-}
-
-fn parse_object_name(name: &ObjectName) -> Result<CollectionSpec> {
-    if name.0.len() != 1 {
-        return Err(FireqlError::Unsupported(
-            "Only simple collection names are supported".to_string(),
-        ));
-    }
-    let ident = match &name.0[0] {
-        ObjectNamePart::Identifier(ident) => ident,
-        _ => {
-            return Err(FireqlError::Unsupported(
-                "Only simple collection names are supported".to_string(),
-            ))
-        }
-    };
-    Ok(CollectionSpec {
-        collection_id: ident.value.clone(),
-        parent_path: None,
-        is_group: false,
-    })
 }
 
 fn parse_projection(items: &[SelectItem]) -> Result<SelectProjection> {
@@ -727,30 +543,6 @@ fn parse_aggregate_expr(expr: &Expr, alias: Option<String>) -> Result<Option<Agg
     }
 }
 
-fn expr_to_string_literal(expr: &Expr, context: &str) -> Result<String> {
-    match expr {
-        Expr::Value(vws) => match &vws.value {
-            Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => Ok(s.clone()),
-            _ => Err(FireqlError::Unsupported(format!(
-                "{context} expects a string literal"
-            ))),
-        },
-        _ => Err(FireqlError::Unsupported(format!(
-            "{context} expects a string literal"
-        ))),
-    }
-}
-
-fn extract_function_arg_list(args: &FunctionArguments) -> Result<&[FunctionArg]> {
-    match args {
-        FunctionArguments::List(list) => Ok(&list.args),
-        FunctionArguments::None => Ok(&[]),
-        _ => Err(FireqlError::Unsupported(
-            "Subquery function arguments are not supported".to_string(),
-        )),
-    }
-}
-
 fn parse_count_arg(args: &FunctionArguments) -> Result<Option<String>> {
     let args = extract_function_arg_list(args)?;
     if args.len() != 1 {
@@ -759,8 +551,8 @@ fn parse_count_arg(args: &FunctionArguments) -> Result<Option<String>> {
         ));
     }
     match &args[0] {
-        FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => Ok(None),
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => match expr {
+        sqlparser::ast::FunctionArg::Unnamed(FunctionArgExpr::Wildcard) => Ok(None),
+        sqlparser::ast::FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => match expr {
             Expr::Identifier(_) | Expr::CompoundIdentifier(_) | Expr::Value(_) => Ok(None),
             _ => Err(FireqlError::Unsupported(
                 "COUNT supports field, literal, or *".to_string(),
@@ -780,7 +572,7 @@ fn parse_single_field_arg(args: &FunctionArguments, label: &str) -> Result<Strin
         )));
     }
     match &args[0] {
-        FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => parse_field_expr(expr),
+        sqlparser::ast::FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => parse_field_expr(expr),
         _ => Err(FireqlError::Unsupported(format!(
             "{label} supports only field arguments"
         ))),
@@ -859,310 +651,4 @@ fn parse_assignments(
         result.push((field, value));
     }
     Ok(result)
-}
-
-fn parse_filter_expr(expr: &Expr) -> Result<FilterExpr> {
-    match expr {
-        Expr::Function(function) => parse_filter_function(function),
-        Expr::BinaryOp { left, op, right } => {
-            use sqlparser::ast::BinaryOperator;
-            match op {
-                BinaryOperator::And => {
-                    let left = parse_filter_expr(left)?;
-                    let right = parse_filter_expr(right)?;
-                    Ok(merge_filters(FilterExpr::And(vec![left, right])))
-                }
-                BinaryOperator::Or => {
-                    let left = parse_filter_expr(left)?;
-                    let right = parse_filter_expr(right)?;
-                    Ok(merge_filters(FilterExpr::Or(vec![left, right])))
-                }
-                BinaryOperator::Eq
-                | BinaryOperator::NotEq
-                | BinaryOperator::Lt
-                | BinaryOperator::LtEq
-                | BinaryOperator::Gt
-                | BinaryOperator::GtEq => {
-                    let field = parse_field_expr(left)?;
-                    let value = parse_value_expr(right)?;
-                    let op = match op {
-                        BinaryOperator::Eq => CompareOp::Eq,
-                        BinaryOperator::NotEq => CompareOp::NotEq,
-                        BinaryOperator::Lt => CompareOp::Lt,
-                        BinaryOperator::LtEq => CompareOp::LtEq,
-                        BinaryOperator::Gt => CompareOp::Gt,
-                        BinaryOperator::GtEq => CompareOp::GtEq,
-                        _ => unreachable!(),
-                    };
-                    Ok(FilterExpr::Compare { field, op, value })
-                }
-                _ => Err(FireqlError::Unsupported(format!(
-                    "Unsupported binary operator: {op}"
-                ))),
-            }
-        }
-        Expr::InList {
-            expr,
-            list,
-            negated,
-        } => {
-            let field = parse_field_expr(expr)?;
-            let mut values = Vec::with_capacity(list.len());
-            for item in list {
-                values.push(parse_value_expr(item)?);
-            }
-            Ok(FilterExpr::InList {
-                field,
-                values,
-                negated: *negated,
-            })
-        }
-        Expr::IsNull(expr) => {
-            let field = parse_field_expr(expr)?;
-            Ok(FilterExpr::Unary {
-                field,
-                op: UnaryOp::IsNull,
-            })
-        }
-        Expr::IsNotNull(expr) => {
-            let field = parse_field_expr(expr)?;
-            Ok(FilterExpr::Unary {
-                field,
-                op: UnaryOp::IsNotNull,
-            })
-        }
-        Expr::Nested(expr) => parse_filter_expr(expr),
-        other => Err(FireqlError::Unsupported(format!(
-            "Unsupported WHERE expression: {other}"
-        ))),
-    }
-}
-
-fn parse_filter_function(function: &sqlparser::ast::Function) -> Result<FilterExpr> {
-    reject_function_modifiers(function, "WHERE function")?;
-
-    let name = object_name_to_string(&function.name);
-    let name_lower = name.to_ascii_lowercase();
-    let args = parse_function_args(&function.args)?;
-
-    match name_lower.as_str() {
-        "array_contains" => {
-            if args.len() != 2 {
-                return Err(FireqlError::Unsupported(
-                    "array_contains(field, value) expects 2 arguments".to_string(),
-                ));
-            }
-            let field = parse_field_expr(&args[0])?;
-            let value = parse_value_expr(&args[1])?;
-            Ok(FilterExpr::ArrayContains { field, value })
-        }
-        "array_contains_any" => {
-            if args.len() < 2 {
-                return Err(FireqlError::Unsupported(
-                    "array_contains_any(field, values...) expects at least 2 arguments".to_string(),
-                ));
-            }
-            let field = parse_field_expr(&args[0])?;
-            let values = if args.len() == 2 {
-                parse_value_list_expr(&args[1])?
-            } else {
-                args[1..]
-                    .iter()
-                    .map(parse_value_expr)
-                    .collect::<Result<Vec<_>>>()?
-            };
-            Ok(FilterExpr::ArrayContainsAny { field, values })
-        }
-        _ => Err(FireqlError::Unsupported(format!(
-            "Unsupported function in WHERE: {name}"
-        ))),
-    }
-}
-
-fn parse_function_args(args: &FunctionArguments) -> Result<Vec<Expr>> {
-    let arg_list = extract_function_arg_list(args)?;
-    let mut exprs = Vec::with_capacity(arg_list.len());
-    for arg in arg_list {
-        match arg {
-            FunctionArg::Unnamed(FunctionArgExpr::Expr(expr)) => exprs.push(expr.clone()),
-            _ => {
-                return Err(FireqlError::Unsupported(
-                    "Only unnamed function arguments are supported".to_string(),
-                ))
-            }
-        }
-    }
-    Ok(exprs)
-}
-
-fn parse_value_list_expr(expr: &Expr) -> Result<Vec<SqlValue>> {
-    match expr {
-        Expr::Array(array) => array
-            .elem
-            .iter()
-            .map(parse_value_expr)
-            .collect::<Result<Vec<_>>>(),
-        Expr::Tuple(items) => items
-            .iter()
-            .map(parse_value_expr)
-            .collect::<Result<Vec<_>>>(),
-        other => Ok(vec![parse_value_expr(other)?]),
-    }
-}
-
-fn merge_filters(expr: FilterExpr) -> FilterExpr {
-    match expr {
-        FilterExpr::And(filters) => {
-            let mut merged = Vec::new();
-            for f in filters {
-                match f {
-                    FilterExpr::And(inner) => merged.extend(inner),
-                    other => merged.push(other),
-                }
-            }
-            FilterExpr::And(merged)
-        }
-        FilterExpr::Or(filters) => {
-            let mut merged = Vec::new();
-            for f in filters {
-                match f {
-                    FilterExpr::Or(inner) => merged.extend(inner),
-                    other => merged.push(other),
-                }
-            }
-            FilterExpr::Or(merged)
-        }
-        other => other,
-    }
-}
-
-fn parse_field_expr(expr: &Expr) -> Result<String> {
-    match expr {
-        Expr::Identifier(ident) => Ok(ident.value.clone()),
-        Expr::CompoundIdentifier(idents) => Ok(idents
-            .iter()
-            .map(|ident| ident.value.as_str())
-            .collect::<Vec<_>>()
-            .join(".")),
-        other => Err(FireqlError::Unsupported(format!(
-            "Unsupported field expression: {other}"
-        ))),
-    }
-}
-
-fn parse_value_expr(expr: &Expr) -> Result<SqlValue> {
-    match expr {
-        Expr::Value(vws) => Ok(SqlValue::Literal(parse_value(&vws.value)?)),
-        Expr::Function(function) => parse_value_function(function),
-        Expr::Identifier(ident) => {
-            if ident.value.eq_ignore_ascii_case("current_timestamp") {
-                Ok(SqlValue::CurrentTimestamp)
-            } else {
-                Err(FireqlError::Unsupported(format!(
-                    "Unsupported identifier in value expression: {ident}"
-                )))
-            }
-        }
-        Expr::UnaryOp { op, expr } => match op {
-            sqlparser::ast::UnaryOperator::Minus => match &**expr {
-                Expr::Value(vws) => match &vws.value {
-                    Value::Number(num, _) => {
-                        let with_sign = format!("-{num}");
-                        Ok(SqlValue::Literal(parse_numeric(&with_sign)?))
-                    }
-                    _ => Err(FireqlError::Unsupported(
-                        "Unary minus only supported for numeric literals".to_string(),
-                    )),
-                },
-                _ => Err(FireqlError::Unsupported(
-                    "Unary minus only supported for numeric literals".to_string(),
-                )),
-            },
-            _ => Err(FireqlError::Unsupported(
-                "Only unary minus is supported for values".to_string(),
-            )),
-        },
-        other => Err(FireqlError::Unsupported(format!(
-            "Unsupported value expression: {other}"
-        ))),
-    }
-}
-
-fn parse_value_function(function: &sqlparser::ast::Function) -> Result<SqlValue> {
-    let name = object_name_to_string(&function.name);
-    let name_lower = name.to_ascii_lowercase();
-    let args = parse_function_args(&function.args)?;
-
-    match name_lower.as_str() {
-        "ref" | "reference" => {
-            if args.len() != 1 {
-                return Err(FireqlError::Unsupported(
-                    "ref(path) expects exactly one argument".to_string(),
-                ));
-            }
-            let path = expr_to_string_literal(&args[0], "ref(path)")?;
-            Ok(SqlValue::Reference(path))
-        }
-        "timestamp" => {
-            if args.len() != 1 {
-                return Err(FireqlError::Unsupported(
-                    "timestamp(value) expects exactly one argument".to_string(),
-                ));
-            }
-            let value = expr_to_string_literal(&args[0], "timestamp(value)")?;
-            let parsed = DateTime::parse_from_rfc3339(&value)
-                .map_err(|e| FireqlError::InvalidQuery(format!("Invalid timestamp: {e}")))?;
-            Ok(SqlValue::Timestamp(parsed.with_timezone(&Utc)))
-        }
-        "current_timestamp" => {
-            if !args.is_empty() {
-                return Err(FireqlError::Unsupported(
-                    "CURRENT_TIMESTAMP expects no arguments".to_string(),
-                ));
-            }
-            Ok(SqlValue::CurrentTimestamp)
-        }
-        _ => Err(FireqlError::Unsupported(format!(
-            "Unsupported function in value expression: {name}"
-        ))),
-    }
-}
-
-fn parse_value(value: &Value) -> Result<JsonValue> {
-    match value {
-        Value::SingleQuotedString(s) | Value::DoubleQuotedString(s) => {
-            Ok(JsonValue::String(s.clone()))
-        }
-        Value::Number(num, _) => parse_numeric(num),
-        Value::Boolean(b) => Ok(JsonValue::Bool(*b)),
-        Value::Null => Ok(JsonValue::Null),
-        other => Err(FireqlError::Unsupported(format!(
-            "Unsupported literal: {other}"
-        ))),
-    }
-}
-
-fn parse_numeric(input: &str) -> Result<JsonValue> {
-    if let Ok(int) = input.parse::<i64>() {
-        Ok(JsonValue::Number(int.into()))
-    } else if let Ok(float) = input.parse::<f64>() {
-        serde_json::Number::from_f64(float)
-            .map(JsonValue::Number)
-            .ok_or_else(|| FireqlError::Unsupported("Invalid float literal".to_string()))
-    } else {
-        Err(FireqlError::Unsupported(
-            "Numeric literal must be int or float".to_string(),
-        ))
-    }
-}
-
-fn object_name_to_string(name: &ObjectName) -> String {
-    name.0
-        .iter()
-        .filter_map(|part| match part {
-            ObjectNamePart::Identifier(ident) => Some(ident.value.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join(".")
 }

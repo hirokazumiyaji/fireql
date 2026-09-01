@@ -28,11 +28,12 @@ cat query.sql | ./target/release/fireql --project-id my-project
 
 | オプション | 説明 |
 |---|---|
-| `--project-id` | GCP プロジェクト ID（必須。環境変数 `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` でも可） |
+| `--project-id` | GCP プロジェクト ID（必須。環境変数 `FIRESTORE_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` でも可） |
 | `--database-id` | Firestore database ID（省略時は `(default)`） |
 | `--credentials` | サービスアカウント JSON のパス |
 | `--sql` | SQL を直接渡す（省略時は stdin から読む） |
 | `--pretty` | JSON を整形出力 |
+| `--format` | 出力フォーマット（`json`（既定）/ `csv` / `table`） |
 | `--batch-parallelism` | UPDATE/DELETE のバッチ並列度（既定 1） |
 
 ### 認証
@@ -149,14 +150,16 @@ match output {
 
 - `INNER JOIN` / `LEFT JOIN` に対応
 - 結合条件は等値（`=`）のみ。`ON left.field = right.field` の形式で、`__name__`（document ID）も結合キーに使えます
-- 複数の JOIN を連結できます
-- 結合は **クライアント側** で実行されます。左側のクエリ結果から結合キーを集め、右側を `IN`（最大 10 件ずつ分割）で取得してハッシュ結合します
-- 出力フィールドはテーブル別名（または collection ID）で接頭辞が付きます（例: `users.name`, `orders.amount`）
+- 複数の JOIN を連結できます。2 つ目以降の JOIN の ON 句では、それまでに結合したテーブル（右側テーブルを含む）を左辺に参照でき、`o.__name__` のように先行テーブルの document ID も結合キーに使えます
+- 結合は **クライアント側** で実行されます。左側のクエリ結果から結合キーを集め、右側を `IN`（最大 30 件ずつ分割）で取得してハッシュ結合します
+- 出力フィールドはテーブル別名（または collection ID）で接頭辞が付きます（例: `users.name`, `orders.amount`）。結合したテーブルの document ID は `{別名}.__name__` として出力されます
 
 ```sql
 SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id;
 SELECT * FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
 SELECT u.name, d.dept_name FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
+SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id
+  INNER JOIN items i ON i.order_id = o.__name__;
 ```
 
 結合キーに使えるのは string / integer / boolean / document ID のみです。NULL 値は結合対象になりません。
@@ -238,6 +241,12 @@ SELECT AVG(score) FROM users WHERE active = true;
 { "affected": 5 }
 ```
 
+### CSV / Table
+
+- `--format csv`: ヘッダ列は**先頭行のフィールド**のみ（行ストリーミング可能）。後続行だけが持つフィールドは列に出ません
+- `--format table`: 表示用のため全行のフィールド union をバッファリングします
+- ライブラリから CSV を逐次書き出す場合は `write_csv_rows` を使えます
+
 ## 7. Firestore 制約（実装で検証）
 
 - `UPDATE` / `DELETE` は `WHERE` 必須
@@ -255,19 +264,40 @@ SELECT AVG(score) FROM users WHERE active = true;
 
 ## 8. Emulator テスト
 
-`FIRESTORE_EMULATOR_HOST` を設定した場合のみ統合テストが動きます。
+`tests/emulator.rs` / `tests/e2e_seed.rs` は Firestore Emulator が必要です。
+`FIRESTORE_EMULATOR_HOST` が未設定のときは各テストが内部でスキップされます。
+
+CI（`.github/workflows/ci.yml`）では Emulator を起動したうえで `cargo test --all` を実行しています。
+
+### ローカルでの起動手順
+
+1. ツールチェーンを入れる（任意だが推奨）:
+
+```bash
+mise install   # Rust + Java (Temurin 21)。Emulator 起動に Java が必要
+```
+
+2. Firestore Emulator を起動する:
+
+```bash
+gcloud components install cloud-firestore-emulator beta
+gcloud beta emulators firestore start --host-port=localhost:8080
+```
+
+3. 別ターミナルで環境変数を設定してテストする（CI と同じ値）:
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
-export FIRESTORE_PROJECT_ID=demo-fireql
-cargo test
+export FIRESTORE_PROJECT_ID=fireql-emulator
+export GOOGLE_CLOUD_PROJECT=fireql-emulator
+cargo test --test emulator --test e2e_seed
 ```
 
 固定の e2e データを投入する場合は `fixtures/emulator-e2e.json` を `fireql-emulator-seed` で流し込みます。
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
-export FIRESTORE_PROJECT_ID=demo-fireql
+export FIRESTORE_PROJECT_ID=fireql-emulator
 cargo run --bin fireql-emulator-seed
 ```
 

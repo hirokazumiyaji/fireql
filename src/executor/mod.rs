@@ -4,13 +4,13 @@ mod insert_select;
 mod select;
 
 use crate::error::Result;
-use crate::output::FireqlOutput;
-use crate::sql::StatementAst;
+use crate::output::{FireqlOutput, FireqlStream};
+use crate::sql::{SelectProjection, StatementAst};
 use firestore::FirestoreDb;
 
 use batch::{build_update_parts, execute_batch_write, BatchOp};
 use insert_select::execute_insert_select;
-use select::execute_select;
+use select::{execute_select, stream_select_rows};
 
 pub async fn execute(
     db: &FirestoreDb,
@@ -50,5 +50,30 @@ pub async fn execute(
         StatementAst::InsertSelect(insert) => {
             execute_insert_select(db, insert, batch_parallelism).await
         }
+    }
+}
+
+/// Streaming variant of [`execute`] (#55).
+///
+/// A plain SELECT (fields projection, no JOIN) is returned as
+/// [`FireqlStream::Rows`], streaming documents as they arrive so callers can
+/// keep their memory footprint constant. Aggregations, JOINed SELECTs, and
+/// UPDATE/DELETE/INSERT SELECT statements run eagerly and are returned as
+/// [`FireqlStream::Completed`].
+pub async fn execute_stream<'a>(
+    db: &'a FirestoreDb,
+    stmt: StatementAst,
+    batch_parallelism: usize,
+) -> Result<FireqlStream<'a>> {
+    match stmt {
+        StatementAst::Select(select) if select.joins.is_none() => {
+            if matches!(select.projection, SelectProjection::Fields(_)) {
+                return Ok(FireqlStream::Rows(stream_select_rows(db, &select).await?));
+            }
+            Ok(FireqlStream::Completed(execute_select(db, select).await?))
+        }
+        other => Ok(FireqlStream::Completed(
+            execute(db, other, batch_parallelism).await?,
+        )),
     }
 }

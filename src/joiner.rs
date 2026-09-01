@@ -146,6 +146,15 @@ pub fn hash_join(
                             .iter()
                             .map(|(k, v)| (format!("{right_prefix}.{k}"), v.clone())),
                     );
+                    // 結合した右側ドキュメントの ID を `{right_prefix}.__name__`
+                    // として保持する。先行する右側テーブルの `__name__` を
+                    // 後続の JOIN の結合キー (`o.__name__` など) や SELECT の
+                    // 射影に使えるようにするため。ドキュメント自身のフィールド
+                    // より優先される (Firestore の `__name__` はドキュメント名)。
+                    merged.insert(
+                        format!("{right_prefix}.__name__"),
+                        FireqlValue::String(right_doc.id.clone()),
+                    );
                     result.push(emit_left(left_doc, merged));
                 }
             }
@@ -369,6 +378,34 @@ mod tests {
         assert_eq!(
             result[0].data.get("reviews.score"),
             Some(&FireqlValue::Integer(95))
+        );
+    }
+
+    #[test]
+    fn hash_join_preserves_right_document_id_as_name_field() {
+        let left = vec![make_doc(
+            "u1",
+            vec![("order_id", FireqlValue::String("o1".into()))],
+        )];
+        let right = vec![make_doc("o1", vec![("amount", FireqlValue::Integer(100))])];
+
+        let result = hash_join(
+            &left,
+            &right,
+            &jp(
+                "order_id",
+                "__name__",
+                JoinType::Inner,
+                "users",
+                "orders",
+                true,
+            ),
+        )
+        .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(
+            result[0].data.get("orders.__name__"),
+            Some(&FireqlValue::String("o1".into()))
         );
     }
 

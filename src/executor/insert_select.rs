@@ -1,11 +1,12 @@
-use super::batch::{count_batch_outcome, drain_batch_results, into_batches, FireqlWrite};
+use super::batch::{count_batch_outcome, drain_batch_results, FireqlWrite, BATCH_LIMIT};
 use super::doc_name::parse_doc_name;
+use super::select::stream_planned_select;
 use crate::error::{FireqlError, Result};
 use crate::output::FireqlOutput;
-use crate::planner::build_query_params;
+use crate::planner::plan_select;
 use crate::sql::{CollectionSpec, InsertSelectStatement, Projection, SelectProjection};
-use firestore::{firestore_document_from_map, FirestoreDb, FirestoreQuerySupport};
-use futures::stream::{self, StreamExt};
+use firestore::{firestore_document_from_map, FirestoreDb};
+use futures::stream::{self, StreamExt, TryStreamExt};
 use gcloud_sdk::google::firestore::v1::{precondition, write, Document, Precondition, Write};
 use rand::distr::{Alphanumeric, SampleString};
 use serde_json::Value as JsonValue;
@@ -21,7 +22,7 @@ pub(super) async fn execute_insert_select(
         ));
     };
     let query_projection = insert_select_query_projection(projection);
-    let params = build_query_params(
+    let planned = plan_select(
         &stmt.source.collection,
         stmt.source.filter.as_ref(),
         &stmt.source.order_by,
@@ -30,48 +31,58 @@ pub(super) async fn execute_insert_select(
         Some(db.get_documents_path().as_str()),
     )?;
 
-    let docs = db.query_doc(params).await?;
-    if docs.is_empty() {
+    // Stream the source query and write in BATCH_LIMIT-sized chunks so the
+    // full source collection is never held in memory at once.
+    let chunk_stream = stream_planned_select(db, planned)
+        .await?
+        .try_chunks(BATCH_LIMIT)
+        .map(|chunk| match chunk {
+            Ok(docs) => Ok(docs),
+            Err(err) => Err(FireqlError::from(err.1)),
+        })
+        .map(|chunk_result| {
+            let db = db.clone();
+            let collection = stmt.collection.clone();
+            let columns = stmt.columns.clone();
+            let projection = projection.clone();
+            async move {
+                let chunk = chunk_result?;
+                let chunk_len = chunk.len();
+                let parent = insert_parent_path(&db, &collection);
+                let writer = db.create_simple_batch_writer().await?;
+                let mut batch = writer.new_batch();
+
+                for doc in chunk {
+                    let parts = build_insert_select_parts(doc, columns.as_deref(), &projection)?;
+                    let id = parts.id.unwrap_or_else(generate_document_id);
+                    let doc_path = format!("{parent}/{}/{}", collection.collection_id, id);
+                    let insert_doc = firestore_document_from_map(&doc_path, parts.fields)?;
+                    batch.add(FireqlWrite(Write {
+                        update_mask: None,
+                        update_transforms: vec![],
+                        current_document: Some(Precondition {
+                            condition_type: Some(precondition::ConditionType::Exists(false)),
+                        }),
+                        operation: Some(write::Operation::Update(insert_doc)),
+                    }))?;
+                }
+
+                let response = batch.write().await?;
+                Ok::<(usize, Option<String>), FireqlError>(count_batch_outcome(
+                    &response.statuses,
+                    chunk_len,
+                ))
+            }
+        })
+        .buffer_unordered(batch_parallelism);
+
+    // Collect into a Vec stream so drain_batch_results can poll it; an empty
+    // source yields no chunks and reports affected = 0.
+    let results: Vec<_> = chunk_stream.collect().await;
+    if results.is_empty() {
         return Ok(FireqlOutput::Affected { affected: 0 });
     }
-
-    let chunks = into_batches(docs);
-    let stream = stream::iter(chunks.into_iter().map(|chunk| {
-        let db = db.clone();
-        let collection = stmt.collection.clone();
-        let columns = stmt.columns.clone();
-        let projection = projection.clone();
-        async move {
-            let parent = insert_parent_path(&db, &collection);
-            let writer = db.create_simple_batch_writer().await?;
-            let mut batch = writer.new_batch();
-            let chunk_len = chunk.len();
-
-            for doc in chunk {
-                let parts = build_insert_select_parts(doc, columns.as_deref(), &projection)?;
-                let id = parts.id.unwrap_or_else(generate_document_id);
-                let doc_path = format!("{parent}/{}/{}", collection.collection_id, id);
-                let insert_doc = firestore_document_from_map(&doc_path, parts.fields)?;
-                batch.add(FireqlWrite(Write {
-                    update_mask: None,
-                    update_transforms: vec![],
-                    current_document: Some(Precondition {
-                        condition_type: Some(precondition::ConditionType::Exists(false)),
-                    }),
-                    operation: Some(write::Operation::Update(insert_doc)),
-                }))?;
-            }
-
-            let response = batch.write().await?;
-            Ok::<(usize, Option<String>), FireqlError>(count_batch_outcome(
-                &response.statuses,
-                chunk_len,
-            ))
-        }
-    }))
-    .buffer_unordered(batch_parallelism);
-
-    drain_batch_results(stream).await
+    drain_batch_results(stream::iter(results)).await
 }
 
 fn insert_select_query_projection(projection: &Projection) -> Option<Projection> {

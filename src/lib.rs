@@ -8,19 +8,20 @@ mod sql;
 mod value;
 
 pub use error::{FireqlError, Result};
-pub use format::Format;
-pub use output::{DocOutput, FireqlOutput};
+pub use format::{write_csv_rows, write_csv_rows_stream, write_json_rows_stream, Format};
+pub use output::{DocOutput, FireqlOutput, FireqlStream};
 pub use sql::parse_collection_relative_path;
 pub use value::FireqlValue;
 
 use async_trait::async_trait;
 use firestore::{FirestoreDb, FirestoreDbOptions};
-use gcloud_sdk::{BoxSource, Source, Token, TokenSourceType};
+use gcloud_sdk::{BoxSource, SecretValue, Source, Token, TokenSourceType};
 use std::path::PathBuf;
 
 pub(crate) enum CredentialSource {
     FilePath(PathBuf),
     Json(String),
+    AccessToken(String),
 }
 
 impl std::fmt::Debug for CredentialSource {
@@ -28,7 +29,25 @@ impl std::fmt::Debug for CredentialSource {
         match self {
             CredentialSource::FilePath(_) => f.write_str("CredentialSource::FilePath(<redacted>)"),
             CredentialSource::Json(_) => f.write_str("CredentialSource::Json(<redacted>)"),
+            CredentialSource::AccessToken(_) => {
+                f.write_str("CredentialSource::AccessToken(<redacted>)")
+            }
         }
+    }
+}
+
+struct AccessTokenSource {
+    token: SecretValue,
+}
+
+#[async_trait]
+impl Source for AccessTokenSource {
+    async fn token(&self) -> gcloud_sdk::error::Result<Token> {
+        Ok(Token::new(
+            "Bearer".to_string(),
+            self.token.clone(),
+            firestore::jiff::Timestamp::MAX,
+        ))
     }
 }
 
@@ -81,6 +100,15 @@ impl FireqlConfig {
         self.with_credentials_json(json.to_string())
     }
 
+    /// Uses a pre-issued OAuth access token as the Bearer credential for Firestore requests.
+    ///
+    /// Token refresh and expiry handling are the caller's responsibility; expired tokens
+    /// surface as Firestore authentication errors.
+    pub fn with_access_token(mut self, token: impl Into<String>) -> Self {
+        self.credentials_source = Some(CredentialSource::AccessToken(token.into()));
+        self
+    }
+
     /// Targets a Firestore emulator listening on `host` (`host:port`, or a full
     /// URL) instead of the production API.
     ///
@@ -115,7 +143,7 @@ impl Source for EmulatorTokenSource {
         Ok(Token::new(
             "Bearer".to_string(),
             "owner".into(),
-            chrono::Utc::now() + chrono::Duration::hours(1),
+            firestore::jiff::Timestamp::MAX,
         ))
     }
 }
@@ -149,6 +177,17 @@ impl Fireql {
                 )
                 .await?
             }
+            Some(CredentialSource::AccessToken(token)) => {
+                let token_source: BoxSource = Box::new(AccessTokenSource {
+                    token: SecretValue::from(token),
+                });
+                FirestoreDb::with_options_token_source(
+                    options,
+                    gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
+                    TokenSourceType::ExternalSource(token_source),
+                )
+                .await?
+            }
             None if config.emulator_host.is_some() => {
                 let token_source: BoxSource = Box::new(EmulatorTokenSource);
                 FirestoreDb::with_options_token_source(
@@ -170,6 +209,17 @@ impl Fireql {
     pub async fn execute(&self, sql: &str) -> Result<FireqlOutput> {
         let stmt = sql::parse_sql(sql)?;
         executor::execute(&self.db, stmt, self.batch_parallelism).await
+    }
+
+    /// Executes `sql` and streams SELECT rows as documents arrive (#55).
+    ///
+    /// Plain SELECT statements return [`FireqlStream::Rows`], a stream of
+    /// [`DocOutput`]s that avoids buffering the whole result set in memory.
+    /// All other statement kinds (and SELECTs with JOIN or aggregation) return
+    /// [`FireqlStream::Completed`] with the same output as [`Fireql::execute`].
+    pub async fn execute_stream(&self, sql: &str) -> Result<FireqlStream<'_>> {
+        let stmt = sql::parse_sql(sql)?;
+        executor::execute_stream(&self.db, stmt, self.batch_parallelism).await
     }
 }
 
@@ -204,6 +254,26 @@ mod tests {
             }
             other => panic!("expected Json, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn with_access_token_sets_access_token_source() {
+        let config = FireqlConfig::new("my-project").with_access_token("my-access-token");
+        match config.credentials_source {
+            Some(CredentialSource::AccessToken(token)) => {
+                assert_eq!(token, "my-access-token");
+            }
+            other => panic!("expected AccessToken, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn access_token_source_debug_is_redacted() {
+        let source = CredentialSource::AccessToken("secret-token".to_string());
+        assert_eq!(
+            format!("{source:?}"),
+            "CredentialSource::AccessToken(<redacted>)"
+        );
     }
 
     #[test]

@@ -28,11 +28,12 @@ cat query.sql | ./target/release/fireql --project-id my-project
 
 | Option | Description |
 |---|---|
-| `--project-id` | GCP project ID (required; can also use env vars `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT`) |
+| `--project-id` | GCP project ID (required; can also use env vars `FIRESTORE_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT`) |
 | `--database-id` | Firestore database ID (defaults to `(default)`) |
 | `--credentials` | Path to a service account JSON key file |
 | `--sql` | SQL query string (reads from stdin if omitted) |
 | `--pretty` | Pretty-print JSON output |
+| `--format` | Output format (`json` (default) / `csv` / `table`) |
 | `--batch-parallelism` | Parallelism for UPDATE/DELETE batch writes (default 1) |
 
 ### Authentication
@@ -149,14 +150,16 @@ When `__name__` appears in the destination columns, the source document ID is re
 
 - `INNER JOIN` / `LEFT JOIN` are supported
 - Join conditions must be equality (`=`) only, in the form `ON left.field = right.field`; `__name__` (document ID) can be used as a join key
-- Multiple JOINs can be chained
-- Joins run **client-side**: join keys are collected from the left query result, the right side is fetched via `IN` (chunked into groups of 10), and the rows are hash-joined
-- Output fields are prefixed with the table alias (or collection ID), e.g. `users.name`, `orders.amount`
+- Multiple JOINs can be chained. In the second and later ON clauses, any previously joined table (including right-side ones) can appear on the left; a prior table's document ID can be referenced as `o.__name__`
+- Joins run **client-side**: join keys are collected from the left query result, the right side is fetched via `IN` (chunked into groups of 30), and the rows are hash-joined
+- Output fields are prefixed with the table alias (or collection ID), e.g. `users.name`, `orders.amount`. A joined table's document ID is emitted as `{alias}.__name__`
 
 ```sql
 SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id;
 SELECT * FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
 SELECT u.name, d.dept_name FROM users u LEFT JOIN departments d ON u.dept_id = d.__name__;
+SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id
+  INNER JOIN items i ON i.order_id = o.__name__;
 ```
 
 Only string / integer / boolean / document ID values can be used as join keys. NULL values never match.
@@ -238,6 +241,12 @@ SELECT AVG(score) FROM users WHERE active = true;
 { "affected": 5 }
 ```
 
+### CSV / Table
+
+- `--format csv`: header columns come from the **first row's fields** only (row-streaming friendly). Fields that appear only on later rows are omitted from the header
+- `--format table`: buffers a union of all fields (display-oriented)
+- Library callers can stream CSV with `write_csv_rows`
+
 ## 7. Firestore Constraints (Validated at Query Time)
 
 - `UPDATE` / `DELETE` require a `WHERE` clause
@@ -255,19 +264,40 @@ SELECT AVG(score) FROM users WHERE active = true;
 
 ## 8. Emulator Tests
 
-Integration tests run only when `FIRESTORE_EMULATOR_HOST` is set.
+`tests/emulator.rs` and `tests/e2e_seed.rs` require the Firestore Emulator.
+When `FIRESTORE_EMULATOR_HOST` is unset, each test skips itself.
+
+CI (`.github/workflows/ci.yml`) starts the emulator and runs `cargo test --all`.
+
+### Local setup
+
+1. Install the toolchain (optional but recommended):
+
+```bash
+mise install   # Rust + Java (Temurin 21). The emulator needs a JVM.
+```
+
+2. Start the Firestore emulator:
+
+```bash
+gcloud components install cloud-firestore-emulator beta
+gcloud beta emulators firestore start --host-port=localhost:8080
+```
+
+3. In another terminal, set the same env vars CI uses and run tests:
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
-export FIRESTORE_PROJECT_ID=demo-fireql
-cargo test
+export FIRESTORE_PROJECT_ID=fireql-emulator
+export GOOGLE_CLOUD_PROJECT=fireql-emulator
+cargo test --test emulator --test e2e_seed
 ```
 
 To load fixed e2e data, seed `fixtures/emulator-e2e.json` with `fireql-emulator-seed`.
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
-export FIRESTORE_PROJECT_ID=demo-fireql
+export FIRESTORE_PROJECT_ID=fireql-emulator
 cargo run --bin fireql-emulator-seed
 ```
 
