@@ -118,15 +118,17 @@ async fn emulator_with_access_token_select_insert() -> Result<(), Box<dyn std::e
         None => return Ok(()),
     };
 
-    let collection = format!("fireql_access_token_{}", unique_suffix());
+    let suffix = unique_suffix();
+    let source = format!("fireql_access_token_source_{suffix}");
+    let dest = format!("fireql_access_token_dest_{suffix}");
     let doc_id = "doc1";
     let data = json!({
         "name": "access-token-user",
         "score": 42,
     });
-    create_test_doc(&db, &collection, doc_id, &data).await?;
+    create_test_doc(&db, &source, doc_id, &data).await?;
 
-    let select_sql = format!("SELECT * FROM {collection} WHERE score = 42 LIMIT 10");
+    let select_sql = format!("SELECT * FROM {source} WHERE score = 42 LIMIT 10");
     let output = fireql.execute(&select_sql).await?;
     match output {
         FireqlOutput::Rows(rows) => {
@@ -136,10 +138,7 @@ async fn emulator_with_access_token_select_insert() -> Result<(), Box<dyn std::e
         _ => panic!("expected rows"),
     }
 
-    let insert_doc_id = "doc2";
-    let insert_sql = format!(
-        "INSERT INTO {collection} (id, name, score) VALUES ('{insert_doc_id}', 'inserted', 99)"
-    );
+    let insert_sql = format!("INSERT INTO {dest} SELECT * FROM {source} WHERE score = 42");
     let output = fireql.execute(&insert_sql).await?;
     match output {
         FireqlOutput::Affected { affected } => {
@@ -148,12 +147,12 @@ async fn emulator_with_access_token_select_insert() -> Result<(), Box<dyn std::e
         _ => panic!("expected affected"),
     }
 
-    let verify_sql = format!("SELECT * FROM {collection} WHERE score = 99 LIMIT 10");
+    let verify_sql = format!("SELECT * FROM {dest} WHERE score = 42 LIMIT 10");
     let output = fireql.execute(&verify_sql).await?;
     match output {
         FireqlOutput::Rows(rows) => {
             assert_eq!(rows.len(), 1);
-            assert_eq!(rows[0].id, insert_doc_id);
+            assert_eq!(rows[0].id, doc_id);
         }
         _ => panic!("expected rows"),
     }
