@@ -3,7 +3,9 @@ mod support;
 use fireql::{DocOutput, FireqlError, FireqlOutput, FireqlStream, FireqlValue};
 use futures::TryStreamExt;
 use serde_json::json;
-use support::{open_db, open_fireql, open_fireql_with_access_token, project_id, should_skip, unique_suffix};
+use support::{
+    open_db, open_fireql, open_fireql_with_access_token, project_id, should_skip, unique_suffix,
+};
 
 async fn create_test_doc(
     db: &firestore::FirestoreDb,
