@@ -3,7 +3,7 @@ mod support;
 use fireql::{DocOutput, FireqlError, FireqlOutput, FireqlStream, FireqlValue};
 use futures::TryStreamExt;
 use serde_json::json;
-use support::{open_db, open_fireql, project_id, should_skip, unique_suffix};
+use support::{open_db, open_fireql, open_fireql_with_access_token, project_id, should_skip, unique_suffix};
 
 async fn create_test_doc(
     db: &firestore::FirestoreDb,
@@ -94,6 +94,66 @@ async fn emulator_select_update_delete() -> Result<(), Box<dyn std::error::Error
             assert_eq!(affected, 1);
         }
         _ => panic!("expected affected"),
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn emulator_with_access_token_select_insert() -> Result<(), Box<dyn std::error::Error>> {
+    if should_skip() {
+        eprintln!("skip emulator test: FIRESTORE_EMULATOR_HOST is not set");
+        return Ok(());
+    }
+
+    let project_id = project_id();
+    let db = match open_db(&project_id).await {
+        Some(db) => db,
+        None => return Ok(()),
+    };
+    let fireql = match open_fireql_with_access_token(&project_id, "owner").await {
+        Some(fireql) => fireql,
+        None => return Ok(()),
+    };
+
+    let collection = format!("fireql_access_token_{}", unique_suffix());
+    let doc_id = "doc1";
+    let data = json!({
+        "name": "access-token-user",
+        "score": 42,
+    });
+    create_test_doc(&db, &collection, doc_id, &data).await?;
+
+    let select_sql = format!("SELECT * FROM {collection} WHERE score = 42 LIMIT 10");
+    let output = fireql.execute(&select_sql).await?;
+    match output {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, doc_id);
+        }
+        _ => panic!("expected rows"),
+    }
+
+    let insert_doc_id = "doc2";
+    let insert_sql = format!(
+        "INSERT INTO {collection} (id, name, score) VALUES ('{insert_doc_id}', 'inserted', 99)"
+    );
+    let output = fireql.execute(&insert_sql).await?;
+    match output {
+        FireqlOutput::Affected { affected } => {
+            assert_eq!(affected, 1);
+        }
+        _ => panic!("expected affected"),
+    }
+
+    let verify_sql = format!("SELECT * FROM {collection} WHERE score = 99 LIMIT 10");
+    let output = fireql.execute(&verify_sql).await?;
+    match output {
+        FireqlOutput::Rows(rows) => {
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].id, insert_doc_id);
+        }
+        _ => panic!("expected rows"),
     }
 
     Ok(())
