@@ -1,21 +1,21 @@
 # fireql
 
-A Rust CLI / library for querying Firestore with SQL.
+Firestore を SQL で操作する Rust 製 CLI / ライブラリです。
 
-[日本語](README.md) | [Detailed Documentation](docs/USAGE_en.md)
+[English](README.md) | [詳細ドキュメント](docs/USAGE_ja.md)
 
-## Supported SQL
+## 対応 SQL
 
 - `SELECT ... FROM <collection>` / `FROM collection('path')` / `FROM collection_group('name')`
-- `WHERE` (AND / OR / comparison / IN / IS NULL / array_contains / array_contains_any / ref / timestamp / CURRENT_TIMESTAMP)
-- Aggregation: `COUNT`, `SUM`, `AVG`
-- `INNER JOIN` / `LEFT JOIN` (equality conditions only; joined client-side)
+- `WHERE`（AND / OR / 比較 / IN / IS NULL / array_contains / array_contains_any / ref / timestamp / CURRENT_TIMESTAMP）
+- 集約: `COUNT`, `SUM`, `AVG`
+- `INNER JOIN` / `LEFT JOIN`（等値条件のみ。クライアント側で結合）
 - `ORDER BY` / `LIMIT`
 - `INSERT INTO ... SELECT ...`
 - `UPDATE ... SET ... WHERE ...`
 - `DELETE FROM ... WHERE ...`
 
-## Examples
+## 例
 
 ```sql
 SELECT * FROM users WHERE age >= 18 ORDER BY age DESC LIMIT 10;
@@ -47,20 +47,20 @@ fireql --project-id my-project --sql "SELECT * FROM users LIMIT 5" --pretty
 cat query.sql | fireql --project-id my-project
 ```
 
-Use `--batch-parallelism` to parallelize batch writes for INSERT SELECT/UPDATE/DELETE.
+`--batch-parallelism` で INSERT SELECT/UPDATE/DELETE のバッチ実行を並列化できます。
 
 ```bash
 fireql --project-id my-project --sql "DELETE FROM users WHERE disabled = true" --batch-parallelism 4
 ```
 
-### Authentication
+### 認証
 
-- ADC (`gcloud auth application-default login`, etc.)
-- Service account JSON (`--credentials /path/to/key.json`)
+- ADC（`gcloud auth application-default login` など）
+- サービスアカウント JSON（`--credentials /path/to/key.json`）
 
-## Library
+## ライブラリ
 
-When used as a library, results are returned as typed `FireqlValue` values. Firestore-specific type information (Timestamp, Reference, etc.) is preserved.
+ライブラリとして使う場合、結果は `FireqlValue` 型で返されます。Firestore 固有の型情報（Timestamp, Reference など）がそのまま保持されます。
 
 ```rust
 use fireql::{Fireql, FireqlConfig, FireqlOutput, FireqlValue};
@@ -73,7 +73,7 @@ let fireql = Fireql::new(
 
 let output = fireql.execute("SELECT * FROM users LIMIT 5").await?;
 
-// Access as typed data
+// 型付きデータとしてアクセス
 if let FireqlOutput::Rows(docs) = &output {
     for doc in docs {
         match doc.data.get("created_at") {
@@ -84,17 +84,17 @@ if let FireqlOutput::Rows(docs) = &output {
     }
 }
 
-// Output as JSON (with Firestore type info)
+// JSON として出力（Firestore 型情報付き）
 println!("{}", serde_json::to_string_pretty(&output)?);
 ```
 
-## Output Format
+## 出力形式
 
-The CLI supports `--format json|csv|table`.
+CLI では `--format json|csv|table` で出力形式を選択できます。
 
-> In CSV output, string cells starting with `=` `+` `-` `@` are prefixed with `'` to prevent formula execution (CSV injection) in spreadsheet apps.
+> CSV 出力では、`=` `+` `-` `@` などで始まる文字列セルに `'` を前置してスプレッドシートでの数式実行(CSV injection)を防ぎます。
 
-All values are serialized with a `_firestore_type` tag, including primitive types (null, bool, int, double, string).
+すべての値は `_firestore_type` タグ付きで JSON 出力されます。プリミティブ型（null, bool, int, double, string）も同様です。
 
 ```json
 [
@@ -117,49 +117,49 @@ All values are serialized with a `_firestore_type` tag, including primitive type
 ]
 ```
 
-Aggregation queries:
+集約クエリ:
 
 ```json
 { "count": { "_firestore_type": "integer", "value": 123 } }
 ```
 
-Aggregation keys are the function name (`count`/`sum`/`avg`) or the `AS` alias.
+集約のキー名は関数名（`count`/`sum`/`avg`）または `AS` の別名です。
 
-## Emulator Tests
+## Emulator テスト
 
-`tests/emulator.rs` and `tests/e2e_seed.rs` require the Firestore Emulator.
-When `FIRESTORE_EMULATOR_HOST` is unset, each test skips itself.
+`tests/emulator.rs` / `tests/e2e_seed.rs` は Firestore Emulator が必要です。
+`FIRESTORE_EMULATOR_HOST` が未設定のときは各テストが内部でスキップされます。
 
-CI (`.github/workflows/ci.yml`) starts the emulator and runs `cargo test --all`.
+CI（`.github/workflows/ci.yml`）では Emulator を起動したうえで `cargo test --all` を実行しています。
 
-### Local setup
+### ローカルでの起動手順
 
-1. Install the toolchain (optional but recommended):
+1. ツールチェーンを入れる（任意だが推奨）:
 
 ```bash
-mise install   # Rust + Java (Temurin 21). The emulator needs a JVM.
+mise install   # Rust + Java (Temurin 21)。Emulator 起動に Java が必要
 ```
 
-2. Start the Firestore emulator:
+2. Firestore Emulator を起動する:
 
 ```bash
-# Requires the gcloud CLI and the cloud-firestore-emulator component
+# gcloud CLI と cloud-firestore-emulator コンポーネントが必要
 gcloud components install cloud-firestore-emulator beta
 gcloud beta emulators firestore start --host-port=localhost:8080
 ```
 
-3. In another terminal, set the same env vars CI uses and run tests:
+3. 別ターミナルで環境変数を設定してテストする（CI と同じ値）:
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
 export FIRESTORE_PROJECT_ID=fireql-emulator
 export GOOGLE_CLOUD_PROJECT=fireql-emulator
 cargo test --test emulator --test e2e_seed
-# or the full suite:
+# または全テスト:
 cargo test --all
 ```
 
-Use `fireql-emulator-seed` to load reusable e2e data into the emulator. The fixture lives at `fixtures/emulator-e2e.json`.
+固定の e2e データを emulator に投入したい場合は `fireql-emulator-seed` を使います。投入定義は `fixtures/emulator-e2e.json` にあります。
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
@@ -167,7 +167,7 @@ export FIRESTORE_PROJECT_ID=fireql-emulator
 cargo run --bin fireql-emulator-seed
 ```
 
-After seeding, these queries are available as-is.
+投入後は次のようなクエリをそのまま使えます。
 
 ```sql
 SELECT * FROM e2e_users WHERE active = true ORDER BY score DESC LIMIT 10;
