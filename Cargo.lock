@@ -577,7 +577,7 @@ dependencies = [
  "csv",
  "firestore",
  "futures",
- "gcloud-sdk",
+ "gcloud-sdk 0.31.0",
  "rand 0.10.2",
  "rustls",
  "serde",
@@ -589,14 +589,14 @@ dependencies = [
 
 [[package]]
 name = "firestore"
-version = "0.53.0"
+version = "0.54.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d7fbef3e16beb7563276664cbf18bfe6787149f81a04aa051afd5d928bf950db"
+checksum = "0db39723a7629983bc4ac1932f5e80213eeddd49dec6b9b2e5fd357adf7e338c"
 dependencies = [
  "async-trait",
  "backoff",
  "futures",
- "gcloud-sdk",
+ "gcloud-sdk 0.32.0",
  "hex",
  "hyper",
  "jiff",
@@ -741,6 +741,34 @@ name = "gcloud-sdk"
 version = "0.31.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ae0e5ee4726919531561eadf5b9c560e1f3f7dcb4f6ea05996681d2fb6b7e2c5"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "futures",
+ "hyper",
+ "jiff",
+ "jsonwebtoken",
+ "once_cell",
+ "prost",
+ "prost-types",
+ "reqwest",
+ "secret-vault-value",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tower",
+ "tower-layer",
+ "tracing",
+ "url",
+]
+
+[[package]]
+name = "gcloud-sdk"
+version = "0.32.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7d442bc60c24de35f93f06248ac436c71d276ed1ae804fa866e22d5f72ef1664"
 dependencies = [
  "async-trait",
  "bytes",
