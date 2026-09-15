@@ -1,49 +1,49 @@
-# fireql 使い方
+# fireql Usage
 
-Firestore を SQL で操作する Rust 製 CLI / ライブラリです。
+A Rust CLI / library for querying Firestore with SQL.
 
-[English](USAGE_en.md)
+[日本語](USAGE_ja.md)
 
 ## 1. CLI
 
-### ビルド
+### Build
 
 ```bash
 cargo build --release
 ```
 
-### 実行
+### Run
 
 ```bash
 ./target/release/fireql --project-id my-project --sql "SELECT * FROM users LIMIT 5" --pretty
 ```
 
-ファイル入力:
+File input:
 
 ```bash
 cat query.sql | ./target/release/fireql --project-id my-project
 ```
 
-### CLI オプション
+### CLI Options
 
-| オプション | 説明 |
+| Option | Description |
 |---|---|
-| `--project-id` | GCP プロジェクト ID（必須。環境変数 `FIRESTORE_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` でも可） |
-| `--database-id` | Firestore database ID（省略時は `(default)`） |
-| `--credentials` | サービスアカウント JSON のパス |
-| `--sql` | SQL を直接渡す（省略時は stdin から読む） |
-| `--pretty` | JSON を整形出力 |
-| `--format` | 出力フォーマット（`json`（既定）/ `csv` / `table`） |
-| `--batch-parallelism` | UPDATE/DELETE のバッチ並列度（既定 1） |
+| `--project-id` | GCP project ID (required; can also use env vars `FIRESTORE_PROJECT_ID` / `GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT`) |
+| `--database-id` | Firestore database ID (defaults to `(default)`) |
+| `--credentials` | Path to a service account JSON key file |
+| `--sql` | SQL query string (reads from stdin if omitted) |
+| `--pretty` | Pretty-print JSON output |
+| `--format` | Output format (`json` (default) / `csv` / `table`) |
+| `--batch-parallelism` | Parallelism for UPDATE/DELETE batch writes (default 1) |
 
-### 認証
+### Authentication
 
-- ADC（`gcloud auth application-default login` など）
-- サービスアカウント JSON（`--credentials /path/to/key.json`）
+- ADC (`gcloud auth application-default login`, etc.)
+- Service account JSON (`--credentials /path/to/key.json`)
 
-## 2. ライブラリ
+## 2. Library
 
-### 基本的な使い方
+### Basic Usage
 
 ```rust
 use fireql::{Fireql, FireqlConfig, FireqlOutput};
@@ -58,13 +58,13 @@ let fireql = Fireql::new(
 
 let output = fireql.execute("SELECT * FROM users LIMIT 5").await?;
 
-// JSON 出力
+// JSON output
 println!("{}", serde_json::to_string_pretty(&output)?);
 ```
 
-### FireqlValue による型付きアクセス
+### Typed Access with FireqlValue
 
-ライブラリ利用時は結果が `FireqlValue` 型で返され、Firestore 固有の型情報がそのまま保持されます。
+When used as a library, results are returned as `FireqlValue` types, preserving Firestore-specific type information.
 
 ```rust
 use fireql::{FireqlOutput, FireqlValue};
@@ -103,9 +103,9 @@ match output {
 }
 ```
 
-### FireqlValue 一覧
+### FireqlValue Types
 
-| FireqlValue | Firestore 型 | JSON 出力 |
+| FireqlValue | Firestore Type | JSON Output |
 |---|---|---|
 | `Null` | Null | `{"_firestore_type": "null"}` |
 | `Boolean(bool)` | Boolean | `{"_firestore_type": "boolean", "value": true}` |
@@ -119,24 +119,24 @@ match output {
 | `Array(Vec<FireqlValue>)` | Array | `{"_firestore_type": "array", "value": [...]}` |
 | `Map(HashMap<String, FireqlValue>)` | Map | `{"_firestore_type": "map", "value": {...}}` |
 
-## 3. SQL 対応範囲
+## 3. SQL Support
 
 ### SELECT
 
 - `SELECT * FROM <collection>`
 - `SELECT field1, field2 FROM <collection>`
-- `FROM collection('相対パス')` — `documents` からの相対パスで、末尾がコレクション ID になる奇数セグメント（例: `posts`、`users/user1/posts`）。`collection('posts')` はトップレベル `posts` と同じ。
-- `FROM collection_group('name')` に対応
+- `FROM collection('relative-path')` — path relative to `documents`, odd number of segments ending in a collection ID (e.g. `posts`, `users/user1/posts`). `collection('posts')` is equivalent to top-level `posts`.
+- `FROM collection_group('name')` supported
 - `WHERE` / `ORDER BY` / `LIMIT`
 
 ### UPDATE / DELETE
 
-- `UPDATE <collection> SET ... WHERE ...`（`collection('...')` も可）
+- `UPDATE <collection> SET ... WHERE ...` (`collection('...')` supported)
 - `DELETE FROM <collection> WHERE ...`
 - `DELETE FROM collection_group('name') WHERE ...`
 - `DELETE FROM collection('...') WHERE ...`
 
-`WHERE` は必須です。
+`WHERE` is required.
 
 ### INSERT SELECT
 
@@ -144,15 +144,15 @@ match output {
 - `INSERT INTO collection('...') SELECT * FROM collection('...') WHERE ...`
 - `INSERT INTO <collection> (__name__, field1) SELECT __name__, field1 FROM <collection> WHERE ...`
 
-`__name__` を destination column に含めた場合は元 document ID を使います。含めない場合は新しい document ID が生成されます。`VALUES` / `UPSERT` / 集約 / JOIN / `collection_group()` source は未対応です。
+When `__name__` appears in the destination columns, the source document ID is reused. Without `__name__`, new document IDs are generated. `VALUES`, `UPSERT`, aggregation, JOIN, and `collection_group()` sources are not supported.
 
 ### JOIN
 
-- `INNER JOIN` / `LEFT JOIN` に対応
-- 結合条件は等値（`=`）のみ。`ON left.field = right.field` の形式で、`__name__`（document ID）も結合キーに使えます
-- 複数の JOIN を連結できます。2 つ目以降の JOIN の ON 句では、それまでに結合したテーブル（右側テーブルを含む）を左辺に参照でき、`o.__name__` のように先行テーブルの document ID も結合キーに使えます
-- 結合は **クライアント側** で実行されます。左側のクエリ結果から結合キーを集め、右側を `IN`（最大 30 件ずつ分割）で取得してハッシュ結合します
-- 出力フィールドはテーブル別名（または collection ID）で接頭辞が付きます（例: `users.name`, `orders.amount`）。結合したテーブルの document ID は `{別名}.__name__` として出力されます
+- `INNER JOIN` / `LEFT JOIN` are supported
+- Join conditions must be equality (`=`) only, in the form `ON left.field = right.field`; `__name__` (document ID) can be used as a join key
+- Multiple JOINs can be chained. In the second and later ON clauses, any previously joined table (including right-side ones) can appear on the left; a prior table's document ID can be referenced as `o.__name__`
+- Joins run **client-side**: join keys are collected from the left query result, the right side is fetched via `IN` (chunked into groups of 30), and the rows are hash-joined
+- Output fields are prefixed with the table alias (or collection ID), e.g. `users.name`, `orders.amount`. A joined table's document ID is emitted as `{alias}.__name__`
 
 ```sql
 SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id;
@@ -162,41 +162,41 @@ SELECT * FROM users u INNER JOIN orders o ON u.__name__ = o.user_id
   INNER JOIN items i ON i.order_id = o.__name__;
 ```
 
-結合キーに使えるのは string / integer / boolean / document ID のみです。NULL 値は結合対象になりません。
+Only string / integer / boolean / document ID values can be used as join keys. NULL values never match.
 
-## 4. WHERE で使える演算子 / 値関数
+## 4. WHERE Operators / Value Functions
 
-- 比較: `=`, `!=`, `<`, `<=`, `>`, `>=`
+- Comparison: `=`, `!=`, `<`, `<=`, `>`, `>=`
 - `IN`, `NOT IN`
 - `IS NULL`, `IS NOT NULL`
 - `AND`, `OR`
 - `array_contains(field, value)`
 - `array_contains_any(field, [v1, v2, ...])`
-- `ref('collection/doc')` または `ref('projects/.../databases/(default)/documents/...')`
-- `timestamp('RFC3339')` 例: `timestamp('2024-01-01T00:00:00Z')`, `timestamp('2025-01-01T00:00:00+09:00')`
-- `CURRENT_TIMESTAMP`（または `current_timestamp()`）
+- `ref('collection/doc')` or `ref('projects/.../databases/(default)/documents/...')`
+- `timestamp('RFC3339')` e.g. `timestamp('2024-01-01T00:00:00Z')`, `timestamp('2025-01-01T00:00:00+09:00')`
+- `CURRENT_TIMESTAMP` (or `current_timestamp()`)
 
-> `ref('collection/doc')` は実行時のプロジェクト/DB の `documents` パスに展開されます。
-> これらの値関数は `WHERE` だけでなく `UPDATE SET` の値にも使えます。
-> `CURRENT_TIMESTAMP` は `UPDATE SET` では serverTimestamp に変換され、それ以外では実行時の現在時刻として扱われます。
+> `ref('collection/doc')` is expanded at runtime using the project/database `documents` path.
+> These value functions can be used in both `WHERE` conditions and `UPDATE SET` values.
+> `CURRENT_TIMESTAMP` is converted to serverTimestamp in `UPDATE SET`, and treated as the current client-side timestamp elsewhere.
 
-## 5. 集約（Aggregation）
+## 5. Aggregation
 
-対応: `COUNT`, `SUM`, `AVG`
+Supported: `COUNT`, `SUM`, `AVG`
 
 ```sql
 SELECT COUNT(*) FROM users WHERE active = true;
-SELECT COUNT(age) FROM users WHERE active = true; -- COUNT(*) と同じ扱い
+SELECT COUNT(age) FROM users WHERE active = true; -- treated same as COUNT(*)
 SELECT SUM(score) AS total FROM users WHERE active = true;
 SELECT AVG(score) FROM users WHERE active = true;
 ```
 
-> 集約のキー名は関数名（`count`/`sum`/`avg`）または `AS` の別名です。
-> 集約クエリでは `ORDER BY` / `LIMIT` は使えません。
+> Aggregation keys are the function name (`count`/`sum`/`avg`) or the `AS` alias.
+> `ORDER BY` / `LIMIT` cannot be used with aggregation queries.
 
-## 6. 出力形式
+## 6. Output Format
 
-### 通常クエリ（SELECT）
+### Regular Queries (SELECT)
 
 ```json
 [
@@ -225,7 +225,7 @@ SELECT AVG(score) FROM users WHERE active = true;
 ]
 ```
 
-### 集約クエリ
+### Aggregation Queries
 
 ```json
 { "count": { "_firestore_type": "integer", "value": 123 } }
@@ -243,48 +243,48 @@ SELECT AVG(score) FROM users WHERE active = true;
 
 ### CSV / Table
 
-- `--format csv`: ヘッダ列は**先頭行のフィールド**のみ（行ストリーミング可能）。後続行だけが持つフィールドは列に出ません
-- `--format table`: 表示用のため全行のフィールド union をバッファリングします
-- ライブラリから CSV を逐次書き出す場合は `write_csv_rows` を使えます
+- `--format csv`: header columns come from the **first row's fields** only (row-streaming friendly). Fields that appear only on later rows are omitted from the header
+- `--format table`: buffers a union of all fields (display-oriented)
+- Library callers can stream CSV with `write_csv_rows`
 
-## 7. Firestore 制約（実装で検証）
+## 7. Firestore Constraints (Validated at Query Time)
 
-- `UPDATE` / `DELETE` は `WHERE` 必須
-- `INSERT SELECT` の source は通常 collection または `collection('...')` のみ対応
-- `INSERT SELECT` は `VALUES` / `UPSERT` / 集約 / JOIN / `collection_group()` source 非対応
-- 不等号（`<`, `<=`, `>`, `>=`, `!=`, `NOT IN`）がある場合、最初の `ORDER BY` が同じフィールドである必要がある
-- `IN` は最大 30 件、`NOT IN` は最大 10 件まで
-- `NOT IN` は `IN` / `!=` と併用不可
-- `array_contains` / `array_contains_any` は同時に1つまで
-- `array_contains_any` は `IN` / `NOT IN` と併用不可
-- `array_contains_any` の要素数は最大 30 件
-- 集約は通常フィールドと混在不可（`SELECT name, COUNT(*)` は不可）
-- `JOIN` は `INNER` / `LEFT` のみ、結合条件は等値のみ
-- `JOIN` と `ORDER BY` / `LIMIT` / 集約は併用不可
+- `UPDATE` / `DELETE` require a `WHERE` clause
+- `INSERT SELECT` sources must be normal collections or `collection('...')`
+- `INSERT SELECT` does not support `VALUES`, `UPSERT`, aggregation, JOIN, or `collection_group()` sources
+- When using inequality operators (`<`, `<=`, `>`, `>=`, `!=`, `NOT IN`), the first `ORDER BY` field must match the inequality field
+- `IN` supports up to 30 values, `NOT IN` up to 10
+- `NOT IN` cannot be combined with `IN` or `!=`
+- Only one `array_contains` / `array_contains_any` filter at a time
+- `array_contains_any` cannot be combined with `IN` / `NOT IN`
+- `array_contains_any` supports up to 30 values
+- Aggregations cannot be mixed with regular fields (`SELECT name, COUNT(*)` is not allowed)
+- `JOIN` supports `INNER` / `LEFT` only, with equality join conditions only
+- `JOIN` cannot be combined with `ORDER BY` / `LIMIT` / aggregation
 
-## 8. Emulator テスト
+## 8. Emulator Tests
 
-`tests/emulator.rs` / `tests/e2e_seed.rs` は Firestore Emulator が必要です。
-`FIRESTORE_EMULATOR_HOST` が未設定のときは各テストが内部でスキップされます。
+`tests/emulator.rs` and `tests/e2e_seed.rs` require the Firestore Emulator.
+When `FIRESTORE_EMULATOR_HOST` is unset, each test skips itself.
 
-CI（`.github/workflows/ci.yml`）では Emulator を起動したうえで `cargo test --all` を実行しています。
+CI (`.github/workflows/ci.yml`) starts the emulator and runs `cargo test --all`.
 
-### ローカルでの起動手順
+### Local setup
 
-1. ツールチェーンを入れる（任意だが推奨）:
+1. Install the toolchain (optional but recommended):
 
 ```bash
-mise install   # Rust + Java (Temurin 21)。Emulator 起動に Java が必要
+mise install   # Rust + Java (Temurin 21). The emulator needs a JVM.
 ```
 
-2. Firestore Emulator を起動する:
+2. Start the Firestore emulator:
 
 ```bash
 gcloud components install cloud-firestore-emulator beta
 gcloud beta emulators firestore start --host-port=localhost:8080
 ```
 
-3. 別ターミナルで環境変数を設定してテストする（CI と同じ値）:
+3. In another terminal, set the same env vars CI uses and run tests:
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
@@ -293,7 +293,7 @@ export GOOGLE_CLOUD_PROJECT=fireql-emulator
 cargo test --test emulator --test e2e_seed
 ```
 
-固定の e2e データを投入する場合は `fixtures/emulator-e2e.json` を `fireql-emulator-seed` で流し込みます。
+To load fixed e2e data, seed `fixtures/emulator-e2e.json` with `fireql-emulator-seed`.
 
 ```bash
 export FIRESTORE_EMULATOR_HOST=localhost:8080
@@ -301,7 +301,7 @@ export FIRESTORE_PROJECT_ID=fireql-emulator
 cargo run --bin fireql-emulator-seed
 ```
 
-投入後にそのまま使えるクエリ:
+Queries available immediately after seeding:
 
 ```sql
 SELECT * FROM e2e_users WHERE active = true ORDER BY score DESC LIMIT 10;
