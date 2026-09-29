@@ -6,6 +6,10 @@ updates:
       interval: weekly
     open-pull-requests-limit: 10
     groups:
+      firestore-and-gcloud-sdk:
+        patterns:
+          - "firestore*"
+          - "gcloud-sdk*"
       cargo-minor-patch:
         update-types:
           - minor
