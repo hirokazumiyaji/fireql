@@ -13,7 +13,7 @@ use super::{
 use crate::error::{FireqlError, Result};
 use sqlparser::ast::{
     AssignmentTarget, Expr, FromTable, FunctionArgExpr, FunctionArguments, OrderByExpr,
-    OrderByKind, Query, Select, SelectItem, SetExpr, Statement, Value,
+    OrderByKind, OrderBySort, Query, Select, SelectItem, SetExpr, Statement, Value,
 };
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -611,9 +611,14 @@ fn parse_order_and_limit_from_query_parts(
 
 fn parse_order_by_expr(expr: &OrderByExpr) -> Result<OrderBy> {
     let field = parse_field_expr(&expr.expr)?;
-    let direction = match expr.options.asc {
-        Some(true) | None => OrderDirection::Asc,
-        Some(false) => OrderDirection::Desc,
+    let direction = match &expr.options.sort {
+        Some(OrderBySort::Asc) | None => OrderDirection::Asc,
+        Some(OrderBySort::Desc) => OrderDirection::Desc,
+        Some(OrderBySort::Using(_)) => {
+            return Err(FireqlError::Unsupported(
+                "ORDER BY ... USING is not supported".to_string(),
+            ));
+        }
     };
     Ok(OrderBy { field, direction })
 }
