@@ -30,7 +30,7 @@ pub(super) async fn stream_planned_select<'b>(
         q = q.filter(move |_| Some(filter.clone()));
     }
     if !planned.order_by.is_empty() {
-        q = q.order_by(planned.order_by);
+        q = q.order(|o| o.fields(planned.order_by.clone()));
     }
     if let Some(limit) = planned.limit {
         q = q.limit(limit);
