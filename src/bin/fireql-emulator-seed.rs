@@ -1,7 +1,11 @@
-use async_trait::async_trait;
 use clap::Parser;
 use firestore::{FirestoreDb, FirestoreDbOptions};
-use gcloud_sdk::{BoxSource, Source, Token, TokenSourceType};
+use gcloud_sdk::google_cloud_auth::credentials::{
+    CacheableResource, Credentials, CredentialsProvider, EntityTag,
+};
+use gcloud_sdk::google_cloud_auth::errors::CredentialsError;
+use http::header::{HeaderValue, AUTHORIZATION};
+use http::{Extensions, HeaderMap};
 use serde::Deserialize;
 use serde_json::Value;
 use std::env;
@@ -47,16 +51,46 @@ struct CollectionTarget {
     collection_id: String,
 }
 
-struct EmulatorTokenSource;
+struct EmulatorCredentials {
+    authorization: HeaderValue,
+    entity_tag: EntityTag,
+}
 
-#[async_trait]
-impl Source for EmulatorTokenSource {
-    async fn token(&self) -> gcloud_sdk::error::Result<Token> {
-        Ok(Token::new(
-            "Bearer".to_string(),
-            "owner".into(),
-            firestore::jiff::Timestamp::MAX,
-        ))
+impl EmulatorCredentials {
+    fn new() -> Result<Self, Box<dyn Error>> {
+        let mut authorization = HeaderValue::from_static("Bearer owner");
+        authorization.set_sensitive(true);
+        Ok(Self {
+            authorization,
+            entity_tag: EntityTag::new(),
+        })
+    }
+}
+
+impl std::fmt::Debug for EmulatorCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EmulatorCredentials")
+    }
+}
+
+impl CredentialsProvider for EmulatorCredentials {
+    async fn headers(
+        &self,
+        extensions: Extensions,
+    ) -> Result<CacheableResource<HeaderMap>, CredentialsError> {
+        if extensions.get::<EntityTag>() == Some(&self.entity_tag) {
+            return Ok(CacheableResource::NotModified);
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, self.authorization.clone());
+        Ok(CacheableResource::New {
+            entity_tag: self.entity_tag.clone(),
+            data: headers,
+        })
+    }
+
+    async fn universe_domain(&self) -> Option<String> {
+        None
     }
 }
 
@@ -87,13 +121,9 @@ async fn run() -> Result<(), Box<dyn Error>> {
     if let Some(database_id) = cli.database_id {
         options = options.with_database_id(database_id);
     }
-    let token_source: BoxSource = Box::new(EmulatorTokenSource);
-    let db = FirestoreDb::with_options_token_source(
-        options,
-        gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
-        TokenSourceType::ExternalSource(token_source),
-    )
-    .await?;
+    let db =
+        FirestoreDb::with_options_auth(options, Credentials::from(EmulatorCredentials::new()?))
+            .await?;
 
     let mut total_documents = 0;
     for collection in &fixture.collections {
