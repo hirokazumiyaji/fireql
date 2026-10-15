@@ -13,9 +13,14 @@ pub use output::{DocOutput, FireqlOutput, FireqlStream};
 pub use sql::parse_collection_relative_path;
 pub use value::FireqlValue;
 
-use async_trait::async_trait;
 use firestore::{FirestoreDb, FirestoreDbOptions};
-use gcloud_sdk::{BoxSource, SecretValue, Source, Token, TokenSourceType};
+use gcloud_sdk::google_cloud_auth::credentials::{
+    external_account, impersonated, service_account, user_account, CacheableResource, Credentials,
+    CredentialsProvider, EntityTag,
+};
+use gcloud_sdk::google_cloud_auth::errors::CredentialsError;
+use http::header::{HeaderValue, AUTHORIZATION};
+use http::{Extensions, HeaderMap};
 use std::path::PathBuf;
 
 pub(crate) enum CredentialSource {
@@ -36,19 +41,65 @@ impl std::fmt::Debug for CredentialSource {
     }
 }
 
-struct AccessTokenSource {
-    token: SecretValue,
+struct StaticBearerCredentials {
+    authorization: HeaderValue,
+    entity_tag: EntityTag,
 }
 
-#[async_trait]
-impl Source for AccessTokenSource {
-    async fn token(&self) -> gcloud_sdk::error::Result<Token> {
-        Ok(Token::new(
-            "Bearer".to_string(),
-            self.token.clone(),
-            firestore::jiff::Timestamp::MAX,
-        ))
+impl StaticBearerCredentials {
+    fn new(token: &str) -> Result<Self> {
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {token}"))
+            .map_err(|err| FireqlError::InvalidConfig(err.to_string()))?;
+        authorization.set_sensitive(true);
+        Ok(Self {
+            authorization,
+            entity_tag: EntityTag::new(),
+        })
     }
+}
+
+impl std::fmt::Debug for StaticBearerCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("StaticBearerCredentials(<redacted>)")
+    }
+}
+
+impl CredentialsProvider for StaticBearerCredentials {
+    async fn headers(
+        &self,
+        extensions: Extensions,
+    ) -> std::result::Result<CacheableResource<HeaderMap>, CredentialsError> {
+        if extensions.get::<EntityTag>() == Some(&self.entity_tag) {
+            return Ok(CacheableResource::NotModified);
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(AUTHORIZATION, self.authorization.clone());
+        Ok(CacheableResource::New {
+            entity_tag: self.entity_tag.clone(),
+            data: headers,
+        })
+    }
+
+    async fn universe_domain(&self) -> Option<String> {
+        None
+    }
+}
+
+fn credentials_from_json(json: &str) -> Result<Credentials> {
+    let value: serde_json::Value = serde_json::from_str(json)?;
+    let cred_type = value.get("type").and_then(|v| v.as_str());
+    let credentials = match cred_type {
+        Some("authorized_user") => user_account::Builder::new(value).build(),
+        Some("impersonated_service_account") => impersonated::Builder::new(value).build(),
+        Some("external_account") => external_account::Builder::new(value).build(),
+        Some("service_account") | None => service_account::Builder::new(value).build(),
+        Some(other) => {
+            return Err(FireqlError::InvalidConfig(format!(
+                "unsupported credentials type: {other}"
+            )));
+        }
+    };
+    credentials.map_err(|err| FireqlError::InvalidConfig(err.to_string()))
 }
 
 pub struct FireqlConfig {
@@ -135,19 +186,6 @@ fn emulator_api_url(host: &str) -> String {
     }
 }
 
-struct EmulatorTokenSource;
-
-#[async_trait]
-impl Source for EmulatorTokenSource {
-    async fn token(&self) -> gcloud_sdk::error::Result<Token> {
-        Ok(Token::new(
-            "Bearer".to_string(),
-            "owner".into(),
-            firestore::jiff::Timestamp::MAX,
-        ))
-    }
-}
-
 pub struct Fireql {
     db: FirestoreDb,
     batch_parallelism: usize,
@@ -170,30 +208,19 @@ impl Fireql {
                 FirestoreDb::with_options_service_account_key_file(options, path).await?
             }
             Some(CredentialSource::Json(json)) => {
-                FirestoreDb::with_options_token_source(
-                    options,
-                    gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
-                    TokenSourceType::Json(json),
-                )
-                .await?
+                FirestoreDb::with_options_auth(options, credentials_from_json(&json)?).await?
             }
             Some(CredentialSource::AccessToken(token)) => {
-                let token_source: BoxSource = Box::new(AccessTokenSource {
-                    token: SecretValue::from(token),
-                });
-                FirestoreDb::with_options_token_source(
+                FirestoreDb::with_options_auth(
                     options,
-                    gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
-                    TokenSourceType::ExternalSource(token_source),
+                    Credentials::from(StaticBearerCredentials::new(&token)?),
                 )
                 .await?
             }
             None if config.emulator_host.is_some() => {
-                let token_source: BoxSource = Box::new(EmulatorTokenSource);
-                FirestoreDb::with_options_token_source(
+                FirestoreDb::with_options_auth(
                     options,
-                    gcloud_sdk::GCP_DEFAULT_SCOPES.clone(),
-                    TokenSourceType::ExternalSource(token_source),
+                    Credentials::from(StaticBearerCredentials::new("owner")?),
                 )
                 .await?
             }
@@ -347,5 +374,19 @@ mod tests {
             config.credentials_source,
             Some(CredentialSource::FilePath(_))
         ));
+    }
+
+    #[test]
+    fn credentials_from_json_rejects_unknown_type() {
+        let err = credentials_from_json(r#"{"type":"not-a-credential"}"#).unwrap_err();
+        assert!(
+            matches!(err, FireqlError::InvalidConfig(message) if message.contains("not-a-credential"))
+        );
+    }
+
+    #[test]
+    fn static_bearer_credentials_reject_invalid_tokens() {
+        let err = StaticBearerCredentials::new("token\nwith\nnewlines").unwrap_err();
+        assert!(matches!(err, FireqlError::InvalidConfig(_)));
     }
 }
