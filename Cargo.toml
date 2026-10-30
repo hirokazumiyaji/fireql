@@ -7,7 +7,7 @@ license = "MIT"
 repository = "https://github.com/hirokazumiyaji/fireql"
 
 [dependencies]
-firestore = { version = "0.58", default-features = false, features = ["tls-webpki-roots"] }
+firestore = { version = "0.60", default-features = false, features = ["tls-webpki-roots"] }
 gcloud-sdk = { version = "0.33", default-features = false, features = ["tls-webpki-roots", "google-firestore-v1"] }
 sqlparser = "0.63"
 serde = { version = "1.0", features = ["derive"] }
